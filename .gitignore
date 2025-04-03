@@ -1,0 +1,93 @@
+# 1️⃣ Python-related
+__pycache__/
+*.py[cod]
+*.so
+*.pyo
+*.pyd
+*.swp
+*.swo
+
+# 2️⃣ Virtual Environment
+venv/
+env/
+*.venv
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 3️⃣ Django Stuff
+*.sqlite3
+db.sqlite3
+db.sqlite3-journal
+*.log
+*.pot
+*.pyc
+
+# 4️⃣ Media / Static Files (optional)
+media/
+staticfiles/
+static/
+
+# 5️⃣ Django Migrations (cache but keep actual migrations)
+*/migrations/__pycache__/
+*/migrations/*.pyc
+*/migrations/*.pyo
+
+# 6️⃣ Secrets & Configurations
+.env
+.envrc
+*.pem
+config.json
+settings_local.py
+.env.example
+
+# 7️⃣ IDE & Editor Files
+.vscode/
+.idea/
+*.iml
+*.sublime-project
+*.sublime-workspace
+
+# 8️⃣ OS / System Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+*.bak
+
+# 9️⃣ Node.js / Frontend (if applicable)
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+package-lock.json
+
+# 🔟 Docker Files
+docker-compose.override.yml
+.dockerignore
+docker-entrypoint.sh
+Dockerfile
+
+# 1️⃣1️⃣ Celery & Task Scheduling
+celerybeat-schedule  # SQLite-based Celery Beat schedule file
+celerybeat.pid       # Celery Beat process ID file
+
+# 1️⃣2️⃣ Gunicorn / uWSGI (if used in production)
+gunicorn.log
+gunicorn-access.log
+gunicorn-error.log
+*.pid
+*.sock
+
+# 1️⃣3️⃣ Redis / Cache Files
+*.rdb
+*.aof
+__data__
+
+# 1️⃣4️⃣ Coverage / Test Reports
+htmlcov/
+.coverage
+.tox/
+nosetests.xml
+coverage.xml
+pytest_cache/
+junitxml/
