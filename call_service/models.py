@@ -21,8 +21,10 @@ class Call(models.Model):
         on_delete=models.CASCADE, 
         related_name="host_calls"  # 👈 Add a unique related_name
     )
-
-    room_name = models.CharField(max_length=255, unique=True, default=f"call-{uuid.uuid4().hex[:8]}")
+    def generate_room_name():
+        return f"call-{uuid.uuid4().hex[:8]}"
+    
+    room_name = models.CharField(max_length=255, unique=True, default=generate_room_name)
     
     start_time = models.DateTimeField(auto_now_add=True)
     end_time = models.DateTimeField(null=True, blank=True)
