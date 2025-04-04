@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from a .env file
 import os
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://13.61.11.100/")
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
