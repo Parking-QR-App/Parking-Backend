@@ -13,3 +13,4 @@ python-dotenv
 django-celery-results
 django-cors-headers
 channels
+psycopg
