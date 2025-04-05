@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User
+from .models import User, BlacklistedAccessToken
 from django.utils.timezone import now
 from .utils import generate_otp
 from django.utils import timezone
@@ -7,7 +7,16 @@ from django.utils import timezone
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'phone_number', 'email', 'email_verified']
+        fields = [
+            'id', 'phone_number', 'email', 'first_name', 'last_name',
+            'email_verified', 'created_at', 'updated_at', 'is_active', 'is_staff'
+        ]
+
+
+class BlacklistedAccessTokenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BlacklistedAccessToken
+        fields = ['id', 'token', 'created_at']
 
 class RegisterSerializer(serializers.ModelSerializer):
     class Meta:

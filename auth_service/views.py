@@ -1,13 +1,13 @@
 from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from django.utils.timezone import now
 from .models import User, BlacklistedAccessToken, UserDevice
 from qr_service.models import QRCode
 from .serializers import (
     RegisterSerializer, VerifyOTPSerializer, UserSerializer,
-    VerifyEmailOTPSerializer, EmailOTPSerializer, UpdateUserInfoSerializer
+    VerifyEmailOTPSerializer, EmailOTPSerializer, UpdateUserInfoSerializer, BlacklistedAccessTokenSerializer
 )
 from .utils import send_otp_email, generate_otp
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -238,3 +238,21 @@ class UpdateUserInfoView(APIView):
             "message": "Invalid data.",
             "status": status.HTTP_400_BAD_REQUEST
         }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminUserListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        users = User.objects.all()
+        serializer = UserSerializer(users, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AdminBlacklistedTokenListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        tokens = BlacklistedAccessToken.objects.all()
+        serializer = BlacklistedAccessTokenSerializer(tokens, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
