@@ -38,7 +38,7 @@ class GenerateUserQRCodeView(APIView):
             # Update user data
             user.first_name = first_name
             user.last_name = last_name
-            user.email = email
+            user.email = email.lower()
             user.save()
 
             # Generate QR code
@@ -229,7 +229,7 @@ class RegisterQRCodeView(APIView):
             # Update user data
             user.first_name = first_name
             user.last_name = last_name
-            user.email = email
+            user.email = email.lower()
             user.save()
 
             qr_link_code = generate_qr_code(qr_id)

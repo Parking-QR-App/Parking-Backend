@@ -49,6 +49,7 @@ class EmailOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
     def validate(self, data):
+        data['email'] = data['email'].lower()
         user = self.context['request'].user
         if not user:
             raise serializers.ValidationError("User not found.")
@@ -59,6 +60,7 @@ class VerifyEmailOTPSerializer(serializers.Serializer):
     otp = serializers.CharField()
 
     def validate(self, data):
+        data['email'] = data['email'].lower()
         try:
             user = User.objects.get(email=data['email'])
 

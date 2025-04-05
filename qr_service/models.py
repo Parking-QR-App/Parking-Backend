@@ -4,7 +4,7 @@ from django.conf import settings
 import uuid
 
 class QRCode(models.Model):
-    qr_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    qr_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, 
         on_delete=models.CASCADE, 
