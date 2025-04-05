@@ -8,40 +8,60 @@ from common.authentication import generate_qr_code, decode_and_verify_qr_hash
 import uuid
 from django.conf import settings
 
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.response import Response
+from rest_framework import status
+import uuid
+
+# Assuming generate_qr_code and decode_and_verify_qr_hash are defined elsewhere
+
 class GenerateUserQRCodeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        """Generates a QR code for the authenticated user."""
         try:
             user = request.user
-            
-            # Check if user already has a QR code
-            existing_qr = QRCode.objects.filter(user=user).first()
-            if existing_qr:
+
+            if not user.email_verified:
                 return Response(
-                    {"error": "You already have a QR code.", "status": 400},
-                    status=status.HTTP_400_BAD_REQUEST
+                    {
+                        "error": True,
+                        "message": "Please verify your email before generating a QR code.",
+                        "status": status.HTTP_403_FORBIDDEN,
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # Ensure required data is present in the request
+            if QRCode.objects.filter(user=user).exists():
+                return Response(
+                    {
+                        "error": True,
+                        "message": "You already have a QR code.",
+                        "status": status.HTTP_400_BAD_REQUEST,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             first_name = request.data.get("first_name")
             last_name = request.data.get("last_name")
             email = request.data.get("email")
 
-            if not first_name or not last_name or not email:
+            if not all([first_name, last_name, email]):
                 return Response(
-                    {"error": "First name, last name, and email are required.", "status": 400},
-                    status=status.HTTP_400_BAD_REQUEST
+                    {
+                        "error": True,
+                        "message": "First name, last name, and email are required.",
+                        "status": status.HTTP_400_BAD_REQUEST,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Update user data
             user.first_name = first_name
             user.last_name = last_name
             user.email = email.lower()
             user.save()
 
-            # Generate QR code
             qr_id = str(uuid.uuid4())
             qr_code = QRCode.objects.create(qr_id=qr_id, user=user)
             QRCodeAnalytics.objects.create(qr_code=qr_code)
@@ -49,21 +69,27 @@ class GenerateUserQRCodeView(APIView):
 
             return Response(
                 {
-                    "qr": {
-                        "domain": settings.BACKEND_URL,
-                        "api_route": "/qr/scan-qr/",
-                        "hashed_qr_id": qr_link_code
+                    "data": {
+                        "qr": {
+                            "domain": settings.BACKEND_URL,
+                            "api_route": "/qr/scan-qr/",
+                            "hashed_qr_id": qr_link_code,
+                        }
                     },
-                     "message": "QR code generated.", 
-                     "status": 201
+                    "message": "QR code generated.",
+                    "status": status.HTTP_201_CREATED,
                 },
-                status=status.HTTP_201_CREATED
+                status=status.HTTP_201_CREATED,
             )
 
         except Exception as e:
             return Response(
-                {"error": str(e), "status": 500},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {
+                    "error": True,
+                    "message": str(e),
+                    "status": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
@@ -71,7 +97,6 @@ class GenerateAdminQRCodeView(APIView):
     permission_classes = [IsAdminUser]
 
     def post(self, request):
-        """Admin generates an unregistered QR code that any user can later register."""
         try:
             qr_id = str(uuid.uuid4())
             qr_code = QRCode.objects.create(qr_id=qr_id, user=None)
@@ -80,20 +105,26 @@ class GenerateAdminQRCodeView(APIView):
 
             return Response(
                 {
-                    "qr": {
-                        "domain": settings.BACKEND_URL,
-                        "api_route": "/qr/scan-qr/",
-                        "hashed_qr_id": qr_link_code
+                    "data": {
+                        "qr": {
+                            "domain": settings.BACKEND_URL,
+                            "api_route": "/qr/scan-qr/",
+                            "hashed_qr_id": qr_link_code,
+                        }
                     },
-                    "message": "Admin QR code generated.", 
-                    "status": 201
+                    "message": "Admin QR code generated.",
+                    "status": status.HTTP_201_CREATED,
                 },
-                status=status.HTTP_201_CREATED
+                status=status.HTTP_201_CREATED,
             )
         except Exception as e:
             return Response(
-                {"error": str(e), "status": 500},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {
+                    "error": True,
+                    "message": str(e),
+                    "status": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
@@ -104,32 +135,60 @@ class ScanQRCodeView(APIView):
         try:
             qr_id = decode_and_verify_qr_hash(hashed_qr_id)
             if not qr_id:
-                return Response({"error": "Invalid QR Code", "status": 400}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {
+                        "error": True,
+                        "message": "Invalid QR Code",
+                        "status": status.HTTP_400_BAD_REQUEST,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             try:
                 qr_code = QRCode.objects.get(qr_id=qr_id)
-                
-                # Check if the QR code is active
+
                 if not qr_code.is_active:
-                    return Response({"message": "Cannot make call. QR code is deactivated.", "status": 403}, status=status.HTTP_403_FORBIDDEN)
+                    return Response(
+                        {
+                            "error": True,
+                            "message": "Cannot make call. QR code is deactivated.",
+                            "status": status.HTTP_403_FORBIDDEN,
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
-                analytics, created = QRCodeAnalytics.objects.get_or_create(qr_code=qr_code)
+                analytics, _ = QRCodeAnalytics.objects.get_or_create(qr_code=qr_code)
+                analytics.increment_scan_count(request.user)
 
-                user = request.user if request.user.is_authenticated else None
-                analytics.increment_scan_count(user)  # Update analytics
-
-                if qr_code.user:
-                    return Response({"message": "Make call", "status": 200}, status=status.HTTP_200_OK)
-                else:
-                    return Response({"message": "Register QR", "status": 200}, status=status.HTTP_200_OK)
+                response_msg = (
+                    "Make call" if qr_code.user else "Register QR"
+                )
+                return Response(
+                    {
+                        "message": response_msg,
+                        "status": status.HTTP_200_OK,
+                    },
+                    status=status.HTTP_200_OK,
+                )
 
             except QRCode.DoesNotExist:
-                return Response({"error": "QR Code not found", "status": 404}, status=status.HTTP_404_NOT_FOUND)
+                return Response(
+                    {
+                        "error": True,
+                        "message": "QR Code not found",
+                        "status": status.HTTP_404_NOT_FOUND,
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
         except Exception as e:
             return Response(
-                {"error": str(e), "status": 500},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {
+                    "error": True,
+                    "message": str(e),
+                    "status": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
@@ -137,37 +196,55 @@ class ControlQRCodeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        """Allows a user to activate or deactivate their QR code."""
         try:
             user = request.user
             qr_code = QRCode.objects.filter(user=user).first()
 
             if not qr_code:
                 return Response(
-                    {"error": "No QR code found for this user.", "status": 404},
-                    status=status.HTTP_404_NOT_FOUND
+                    {
+                        "error": True,
+                        "message": "No QR code found for this user.",
+                        "status": status.HTTP_404_NOT_FOUND,
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
                 )
 
             is_active = request.data.get("is_active")
 
             if is_active is None:
                 return Response(
-                    {"error": "is_active field is required.", "status": 400},
-                    status=status.HTTP_400_BAD_REQUEST
+                    {
+                        "error": True,
+                        "message": "is_active field is required.",
+                        "status": status.HTTP_400_BAD_REQUEST,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
-            # Convert to proper boolean
+
             if isinstance(is_active, str):
                 is_active = is_active.lower() in ["true", "1"]
+
             qr_code.is_active = is_active
-            qr_code.save(update_fields=['is_active'])  # Ensure only is_active is updated
-            qr_code.refresh_from_db()  # Ensure data is refreshed from DB
-            status_message = "QR code activated." if qr_code.is_active else "QR code deactivated."
-            return Response({"message": status_message, "status": 200}, status=status.HTTP_200_OK)
+            qr_code.save(update_fields=["is_active"])
+            qr_code.refresh_from_db()
+
+            return Response(
+                {
+                    "message": "QR code activated." if qr_code.is_active else "QR code deactivated.",
+                    "status": status.HTTP_200_OK,
+                },
+                status=status.HTTP_200_OK,
+            )
 
         except Exception as e:
             return Response(
-                {"error": str(e), "status": 500},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {
+                    "error": True,
+                    "message": str(e),
+                    "status": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
@@ -177,36 +254,56 @@ class RegisterQRCodeView(APIView):
     def post(self, request, hashed_qr_id):
         try:
             user = request.user
+
+            # Check if user's email is verified
+            if not user.email_verified:
+                return Response(
+                    {
+                        "error": "Email not verified.",
+                        "message": "Please verify your email before registering a QR code.",
+                        "status": status.HTTP_403_FORBIDDEN
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
             qr_id = decode_and_verify_qr_hash(hashed_qr_id)
 
             if not qr_id:
                 return Response(
-                    {"error": "Invalid QR Code.", "status": 400},
+                    {
+                        "error": "Invalid QR Code.",
+                        "message": "The provided QR code is invalid.",
+                        "status": status.HTTP_400_BAD_REQUEST
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Check if the user already has a QR code registered
             if QRCode.objects.filter(user=user).exists():
                 return Response(
-                    {"error": "You already have a registered QR code.", "status": 400},
+                    {
+                        "error": "User already registered QR code.",
+                        "message": "You already have a registered QR code.",
+                        "status": status.HTTP_400_BAD_REQUEST
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Check if this QR ID already exists but without a user
             qr_code = QRCode.objects.filter(qr_id=qr_id).first()
 
             if qr_code:
                 if qr_code.user:
                     return Response(
-                        {"error": "This QR code is already registered by another user.", "status": 400},
+                        {
+                            "error": "QR code already registered.",
+                            "message": "This QR code is already registered by another user.",
+                            "status": status.HTTP_400_BAD_REQUEST
+                        },
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                # Assign user to existing QR code
                 qr_code.user = user
                 qr_code.is_active = True
                 qr_code.save()
             else:
-                # Create a new QR code if it does not exist
                 qr_code = QRCode.objects.create(
                     qr_id=qr_id,
                     user=user,
@@ -215,18 +312,20 @@ class RegisterQRCodeView(APIView):
                 )
                 QRCodeAnalytics.objects.create(qr_code=qr_code)
 
-            # Validate required user data
             first_name = request.data.get("first_name")
             last_name = request.data.get("last_name")
             email = request.data.get("email")
 
             if not first_name or not last_name or not email:
                 return Response(
-                    {"error": "First name, last name, and email are required.", "status": 400},
+                    {
+                        "error": "Missing user data.",
+                        "message": "First name, last name, and email are required.",
+                        "status": status.HTTP_400_BAD_REQUEST
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Update user data
             user.first_name = first_name
             user.last_name = last_name
             user.email = email.lower()
@@ -236,20 +335,26 @@ class RegisterQRCodeView(APIView):
 
             return Response(
                 {
-                    "qr": {
-                        "domain": settings.BACKEND_URL,
-                        "api_route": "/qr/scan-qr/",
-                        "hashed_qr_id": qr_link_code
+                    "data": {
+                        "qr": {
+                            "domain": settings.BACKEND_URL,
+                            "api_route": "/qr/scan-qr/",
+                            "hashed_qr_id": qr_link_code
+                        }
                     },
                     "message": "QR code registered successfully.",
-                    "status": 201
+                    "status": status.HTTP_201_CREATED
                 },
                 status=status.HTTP_201_CREATED
             )
 
         except Exception as e:
             return Response(
-                {"error": str(e), "status": 500},
+                {
+                    "error": str(e),
+                    "message": "An unexpected error occurred during QR code registration.",
+                    "status": status.HTTP_500_INTERNAL_SERVER_ERROR
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -261,24 +366,47 @@ class QRCodeAnalyticsView(APIView):
         try:
             qr_id = decode_and_verify_qr_hash(hashed_qr_id)
             if not qr_id:
-                return Response({"error": "Invalid QR Code", "status": 400}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {
+                        "error": "Invalid QR Code.",
+                        "message": "The provided QR code is invalid.",
+                        "status": status.HTTP_400_BAD_REQUEST
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
             try:
                 analytics = QRCodeAnalytics.objects.get(qr_code_id=qr_id)
-                data = {
-                    "scan_count": analytics.scan_count,
-                    "unique_users": analytics.unique_users,
-                    "last_scanned": analytics.last_scanned,
-                    "status": 200
-                }
-                return Response(data, status=status.HTTP_200_OK)
+                return Response(
+                    {
+                        "data": {
+                            "scan_count": analytics.scan_count,
+                            "unique_users": analytics.unique_users,
+                            "last_scanned": analytics.last_scanned
+                        },
+                        "message": "QR analytics retrieved successfully.",
+                        "status": status.HTTP_200_OK
+                    },
+                    status=status.HTTP_200_OK
+                )
 
             except QRCodeAnalytics.DoesNotExist:
-                return Response({"error": "No analytics found for this QR code", "status": 404}, status=status.HTTP_404_NOT_FOUND)
+                return Response(
+                    {
+                        "error": "Analytics not found.",
+                        "message": "No analytics found for this QR code.",
+                        "status": status.HTTP_404_NOT_FOUND
+                    },
+                    status=status.HTTP_404_NOT_FOUND
+                )
 
         except Exception as e:
             return Response(
-                {"error": str(e), "status": 500},
+                {
+                    "error": str(e),
+                    "message": "An unexpected error occurred while fetching analytics.",
+                    "status": status.HTTP_500_INTERNAL_SERVER_ERROR
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -293,12 +421,24 @@ class AdminQRCodeAnalyticsView(APIView):
             unique_users = QRCodeAnalytics.objects.aggregate(total=models.Sum("unique_users"))["total"] or 0
 
             return Response(
-                {"total_qr_codes": total_qr_codes, "total_scans": total_scans, "unique_users": unique_users, "status": 200},
+                {
+                    "data": {
+                        "total_qr_codes": total_qr_codes,
+                        "total_scans": total_scans,
+                        "unique_users": unique_users
+                    },
+                    "message": "Admin QR analytics fetched successfully.",
+                    "status": status.HTTP_200_OK
+                },
                 status=status.HTTP_200_OK
             )
 
         except Exception as e:
             return Response(
-                {"error": str(e), "status": 500},
+                {
+                    "error": str(e),
+                    "message": "An unexpected error occurred while fetching admin analytics.",
+                    "status": status.HTTP_500_INTERNAL_SERVER_ERROR
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
