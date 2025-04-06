@@ -155,9 +155,9 @@ CELERY_RESULT_BACKEND = 'django-db'
 
 # Celery Beat Config (For scheduled tasks)
 CELERY_BEAT_SCHEDULE = {
-    'clear_expired_otps_every_10_min': {
+    'clear_expired_otps_every_2_min': {
         'task': 'auth_service.tasks.clear_expired_otps',
-        'schedule': crontab(minute='*/10'),  # Every 10 minutes
+        'schedule': crontab(minute='*/2'),  # Every 10 minutes
     },
     'cleanup_blacklisted_tokens_daily': {
         'task': 'auth_service.tasks.cleanup_blacklisted_tokens',

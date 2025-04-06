@@ -5,7 +5,8 @@ from .models import User, BlacklistedAccessToken
 @shared_task
 def clear_expired_otps():
     User.objects.filter(email_otp_expiry__lt=now()).update(email_otp=None, email_otp_expiry=None)
-    return "Expired OTPs cleared."
+    User.objects.filter(otp_expiry__lt=now()).update(otp=None, otp_expiry=None)
+    return "Expired OTPs and Email OTPs cleared."
 
 @shared_task
 def cleanup_blacklisted_tokens():
