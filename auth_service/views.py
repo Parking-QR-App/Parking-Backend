@@ -10,7 +10,7 @@ from .serializers import (
     VerifyEmailOTPSerializer, EmailOTPSerializer, UpdateUserInfoSerializer, BlacklistedAccessTokenSerializer
 )
 from .utils import send_otp_email, generate_otp
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 import random  # For generating the OTP
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
@@ -125,29 +125,50 @@ class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        try:
-            access_token = request.auth
-            refresh_token = request.data.get("refresh_token")
+        access_token = request.auth
+        refresh_token = request.data.get("refresh_token")
 
-            if access_token:
-                BlacklistedAccessToken.objects.create(token=str(access_token))
-
-            if refresh_token:
-                token = RefreshToken(refresh_token)
-                token.blacklist()
-
+        # Handle missing refresh_token in request
+        if not refresh_token:
             return Response({
-                'data': None,
-                'message': "Logged out successfully.",
-                'status': status.HTTP_205_RESET_CONTENT
-            }, status=status.HTTP_205_RESET_CONTENT)
+                'error': 'Refresh token is required.',
+                'message': 'Logout failed.',
+                'status': status.HTTP_400_BAD_REQUEST
+            }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Blacklist the access token (optional depending on implementation)
+        if access_token:
+            try:
+                BlacklistedAccessToken.objects.create(token=str(access_token))
+            except Exception as e:
+                return Response({
+                    'error': str(e),
+                    'message': 'Failed to blacklist access token.',
+                    'status': status.HTTP_400_BAD_REQUEST
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Blacklist refresh token
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except TokenError as e:
+            return Response({
+                'error': str(e),
+                'message': 'Invalid or already blacklisted refresh token.',
+                'status': status.HTTP_400_BAD_REQUEST
+            }, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({
                 'error': str(e),
-                'message': 'Failed to logout.',
+                'message': 'Failed to blacklist refresh token.',
                 'status': status.HTTP_400_BAD_REQUEST
             }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'data': None,
+            'message': "Logged out successfully.",
+            'status': status.HTTP_205_RESET_CONTENT
+        }, status=status.HTTP_205_RESET_CONTENT)
 
 
 # Send Email OTP View (Sends OTP to user's email)
