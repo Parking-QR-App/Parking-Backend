@@ -2,14 +2,56 @@ from rest_framework import serializers
 from .models import User, BlacklistedAccessToken, UserDevice
 from django.utils.timezone import now
 
-class UserSerializer(serializers.ModelSerializer):
+class BaseUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'phone_number', 'email', 'first_name', 'last_name',
-            'email_verified', 'created_at', 'updated_at', 'is_active', 'is_staff', 'otp', 'otp_expiry'
+            'id', 
+            'phone_number', 
+            'email', 
+            'first_name', 
+            'last_name',
+            'is_active'  # Added as it's commonly needed in many contexts
+        ]
+        read_only_fields = ['id', 'is_active']
+        extra_kwargs = {
+            'email': {'required': True},
+            'phone_number': {'required': True}
+        }
+
+class AdminUserSerializer(BaseUserSerializer):
+    class Meta(BaseUserSerializer.Meta):
+        fields = BaseUserSerializer.Meta.fields + [
+            'email_verified', 
+            'is_staff',
+            'created_at', 
+            'updated_at',
+            'last_login'
+        ]
+        read_only_fields = BaseUserSerializer.Meta.read_only_fields + [
+            'email_verified',
+            'created_at', 
+            'updated_at',
+            'last_login'
         ]
 
+class UserCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = [
+            'phone_number',
+            'email',
+            'first_name',
+            'last_name',
+            'password'  # Special handling needed
+        ]
+        extra_kwargs = {
+            'password': {'write_only': True}
+        }
+
+    def create(self, validated_data):
+        user = User.objects.create_user(**validated_data)
+        return user
 
 class BlacklistedAccessTokenSerializer(serializers.ModelSerializer):
     class Meta:

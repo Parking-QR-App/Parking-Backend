@@ -52,12 +52,13 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'django_celery_results',
     'django_celery_beat',
-    'auth_service',
+    'auth_service.apps.AuthServiceConfig',
     'qr_service',
     'call_service',
     'common',
     "channels",
-    'alert_service.apps.AlertServiceConfig'
+    'alert_service.apps.AlertServiceConfig',
+    'referral_service.apps.ReferralServiceConfig'
 ]
 
 ASGI_APPLICATION = "scanQR.asgi.application"
@@ -141,7 +142,15 @@ AUTH_USER_MODEL = 'auth_service.User'
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ]
+    ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.UserRateThrottle',  # Global throttle
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'user': '10/minute',  # Global rate limit
+        'auth': '5/minute',   # Specific for auth endpoints
+        'referral_code': '10/minute',
+    }
 }
 
 SIMPLE_JWT = {

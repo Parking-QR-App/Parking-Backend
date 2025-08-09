@@ -105,7 +105,24 @@ class User(AbstractBaseUser, PermissionsMixin):
         ]
 
     def __str__(self):
-        return f"{self.id}".strip()  # Return the phone_number as a string identifier
+        return f"{self.id}".strip()  # Return the id as a string identifier for display
+    
+    def get_short_name(self):
+        """Return the short name for the user."""
+        if self.first_name:
+            return self.first_name
+        elif hasattr(self, 'user_name') and self.user_name:
+            return self.user_name
+        elif self.username:
+            return self.username
+        return ''
+    
+    def get_full_name(self):
+        """Return the full name for the user."""
+        if self.first_name and self.last_name:
+            return f"{self.first_name} {self.last_name}"
+        return self.get_short_name()
+
 
 class UserDevice(models.Model):
     DEVICE_TYPES = [
