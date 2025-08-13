@@ -9,7 +9,17 @@ from .auth_client import AuthServiceClient
 
 logger = logging.getLogger(__name__)
 
-
+def get_firebase_cred():
+    """Return a firebase_admin credentials object from either env var or local file."""
+    if os.environ.get("FIREBASE_CREDENTIALS"):
+        # Load from environment variable in production
+        firebase_creds_dict = json.loads(os.environ["FIREBASE_CREDENTIALS"])
+        return credentials.Certificate(firebase_creds_dict)
+    else:
+        # Load from local file in development
+        cred_path = os.path.join(settings.BASE_DIR, 'zegocloud-3d68b-firebase-adminsdk-fbsvc-9a16f37574.json')
+        return credentials.Certificate(cred_path)
+    
 class FCMClient:
     @classmethod
     def initialize(cls):
@@ -17,8 +27,9 @@ class FCMClient:
         if not firebase_admin._apps:
             try:
                 # Use absolute path to avoid path issues in production
-                cred_path = os.path.join(settings.BASE_DIR, 'zegocloud-3d68b-firebase-adminsdk-fbsvc-9a16f37574.json')
-                cred = credentials.Certificate(cred_path)
+                # cred_path = os.path.join(settings.BASE_DIR, 'zegocloud-3d68b-firebase-adminsdk-fbsvc-9a16f37574.json')
+                # cred = credentials.Certificate(cred_path)
+                cred = get_firebase_cred()
                 firebase_admin.initialize_app(cred)
                 logger.info("[FCM] Firebase app initialized successfully.")
             except Exception as e:
