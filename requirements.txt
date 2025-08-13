@@ -17,3 +17,7 @@ pycryptodome
 psycopg2
 django-redis
 django-ratelimit
+gunicorn
+dj-database-url
+psycopg2-binary
+whitenoise[brotli]
