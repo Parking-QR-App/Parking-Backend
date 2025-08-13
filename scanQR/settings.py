@@ -216,8 +216,6 @@ CELERY_BEAT_SCHEDULE = {
 #         "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_CACHE}",
 #         "OPTIONS": {
 #             "CLIENT_CLASS": "django_redis.client.DefaultClient",
-              "PASSWORD": os.getenv("REDIS_PASSWORD", None),
-              "SSL": True,  # for Upstash
 #         }
 #     }
 # }
@@ -227,6 +225,8 @@ CACHES = {
         "LOCATION": f"{REDIS_URL}/{REDIS_DB_CACHE}",
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "PASSWORD": os.getenv("REDIS_PASSWORD", None),
+            "SSL": True,  # for Upstash
         }
     }
 }
