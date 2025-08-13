@@ -16,6 +16,8 @@ from celery.schedules import crontab
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from a .env file
 import os
+import dj_database_url
+
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://13.61.11.100/")
 
