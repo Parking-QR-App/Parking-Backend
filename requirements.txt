@@ -22,3 +22,4 @@ dj-database-url
 psycopg2-binary
 whitenoise[brotli]
 dj-database-url
+firebase-admin
