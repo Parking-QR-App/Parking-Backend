@@ -27,7 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-%fd*8k+6$lc5g*r2pnn(-9%ns-jsk&bmn_(@$*#nk_$7*btshl'
+SECRET_KEY = os.environ.get("SECRET_KEY", "unsafe-default")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -66,6 +66,7 @@ ASGI_APPLICATION = "scanQR.asgi.application"
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # Add this at the top
     'django.middleware.security.SecurityMiddleware',
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -111,13 +112,16 @@ WSGI_APPLICATION = 'scanQR.wsgi.application'
 #         'PORT': '5432',
 #     }
 # }
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',  # 👈 this should be a Path, not string
+#     }
+# }
+# Database (uses Render’s PostgreSQL)
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',  # 👈 this should be a Path, not string
-    }
+    "default": dj_database_url.config(conn_max_age=600)
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
@@ -164,17 +168,28 @@ SIMPLE_JWT = {
 }
 
 # Redis connection info
-REDIS_HOST = 'localhost'
-REDIS_PORT = 6379
-REDIS_DB_CACHE = 1  # For caching (separate from Celery)
-REDIS_DB_BROKER = 0  # Celery broker
+# REDIS_HOST = 'localhost'
+# REDIS_PORT = 6379
+# REDIS_DB_CACHE = 1  # For caching (separate from Celery)
+# REDIS_DB_BROKER = 0  # Celery broker
 
-CELERY_BROKER_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_BROKER}"  # Redis message broker
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")  # default for local dev
+
+# Cache DB index (use separate DB for cache and Celery broker)
+REDIS_DB_CACHE = os.environ.get("REDIS_DB_CACHE", "1")
+REDIS_DB_BROKER = os.environ.get("REDIS_DB_BROKER", "0")
+
+# CELERY_BROKER_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_BROKER}"  # Redis message broker
+# CELERY_ACCEPT_CONTENT = ['json']
+# CELERY_TASK_SERIALIZER = 'json'
+# # Store Celery task results
+# CELERY_RESULT_BACKEND = 'django-db'
+
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", f"{REDIS_URL}/{REDIS_DB_BROKER}")
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_BACKEND = 'django-db'  # or use Redis backend if preferred
 
-# Store Celery task results
-CELERY_RESULT_BACKEND = 'django-db'
 
 # Celery Beat Config (For scheduled tasks)
 CELERY_BEAT_SCHEDULE = {
@@ -193,10 +208,19 @@ CELERY_BEAT_SCHEDULE = {
 }
 
 # Django Cache configuration using django-redis
+# CACHES = {
+#     "default": {
+#         "BACKEND": "django_redis.cache.RedisCache",
+#         "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_CACHE}",
+#         "OPTIONS": {
+#             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+#         }
+#     }
+# }
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_CACHE}",
+        "LOCATION": f"{REDIS_URL}/{REDIS_DB_CACHE}",
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
         }
@@ -230,6 +254,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
