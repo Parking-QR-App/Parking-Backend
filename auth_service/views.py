@@ -8,7 +8,7 @@ from django.utils.timezone import now
 from .models import User, BlacklistedAccessToken, UserDevice
 
 from shared.utils.api_exceptions import (
-    InvalidRequestException, AuthenticationException, BaseServiceException, ValidationException
+    InvalidRequestException, AuthenticationException, BaseServiceException, ValidationException, ResourceNotFoundException
 )
 
 from .serializers import (
@@ -723,3 +723,24 @@ class AdminBlacklistedTokenListView(APIView):
         tokens = BlacklistedAccessToken.objects.all()
         serializer = BlacklistedAccessTokenSerializer(tokens, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+class ScanCarPlateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, car_plate_number):
+        try:
+            user = User.objects.get(license_plate_number=car_plate_number)
+            return Response(
+                {
+                    "message": "User found",
+                    "data": {
+                        "zego_user_id": user.user_id,
+                        "zego_user_name": user.user_name
+                    },
+                    "status": status.HTTP_200_OK
+                },
+                status=status.HTTP_200_OK
+            )
+        
+        except User.DoesNotExist:
+            raise ResourceNotFoundException(detail="No user found with this car plate number")
