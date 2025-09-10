@@ -9,5 +9,5 @@ urlpatterns = [
     path('update-info/', UpdateUserInfoView.as_view(), name='update-info'),
     path('logout/', LogoutView.as_view(), name='logout'),
     path('token-refresh/', CustomTokenRefreshView.as_view(), name='custom_token_refresh'),
-    path('car-plate-scan/', ScanCarPlateView.as_view(), name='car-plate-scan'),
+    path('car-plate-scan/<str:car_plate_number>', ScanCarPlateView.as_view(), name='car-plate-scan'),
 ]
