@@ -98,12 +98,14 @@ class User(AbstractBaseUser, PermissionsMixin):
             Index(fields=['email']),
             Index(fields=['user_id']),
             Index(fields=['user_name']),
+            Index(fields=['license_plate_number'])
         ]
         constraints = [
             models.UniqueConstraint(fields=['phone_number'], name='unique_user_phone'),
             models.UniqueConstraint(fields=['email'], name='unique_user_email'),
             models.UniqueConstraint(fields=['user_id'], name='unique_user_id'),
             models.UniqueConstraint(fields=['user_name'], name='unique_user_name'),
+            models.UniqueConstraint(fields=['license_plate_number'], name='unique_license_plate_number')
         ]
 
     def save(self, *args, **kwargs):
