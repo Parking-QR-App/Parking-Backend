@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from a .env file
 import os
 import dj_database_url
+from platform_settings.cron import PLATFORM_SETTINGS_BEAT_SCHEDULE
 
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://13.61.11.100/")
@@ -55,18 +56,20 @@ INSTALLED_APPS = [
     'django_celery_results',
     'django_celery_beat',
     'auth_service.apps.AuthServiceConfig',
-    'qr_service',
     'call_service',
     'common',
     "channels",
     'alert_service.apps.AlertServiceConfig',
-    'referral_service.apps.ReferralServiceConfig'
+    'referral_service.apps.ReferralServiceConfig',
+    'platform_settings'
 ]
 
 ASGI_APPLICATION = "scanQR.asgi.application"
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',  # Add this at the top
+    "shared.middleware.correlation.CorrelationIdMiddleware",
+    "shared.middleware.drf_exceptions.DRFExceptionMiddleware",
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     "whitenoise.middleware.WhiteNoiseMiddleware",
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -156,7 +159,8 @@ REST_FRAMEWORK = {
         'user': '10/minute',  # Global rate limit
         'auth': '5/minute',   # Specific for auth endpoints
         'referral_code': '10/minute',
-    }
+    },
+    'EXCEPTION_HANDLER': 'shared.utils.api_exceptions.exception_handler',
 }
 
 SIMPLE_JWT = {
@@ -206,6 +210,12 @@ CELERY_BEAT_SCHEDULE = {
     'mark_missed_calls_every_min': {
         'task': 'call_service.tasks.mark_missed_calls',
         'schedule': crontab(minute='*'),
+    },
+    **PLATFORM_SETTINGS_BEAT_SCHEDULE,
+    'reconcile-failed-call-deductions': {
+        'task': 'call_service.tasks.reconcile_failed_call_deductions',
+        'schedule': 3600,  # Run every hour
+        'options': {'queue': 'reconciliation'}
     },
 }
 
@@ -283,3 +293,30 @@ CORS_ALLOW_CREDENTIALS = True
 #     "X-Requested-With",
 # ]
 
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[%(asctime)s] [%(levelname)s] [%(name)s] [corr_id=%(correlation_id)s] %(message)s",
+        },
+    },
+    "filters": {
+        "correlation": {
+            "()": "shared.logging.CorrelationIdFilter",
+        },
+    },
+    "handlers": {
+        "console": {
+            "level": "DEBUG",
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+            "filters": ["correlation"],
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+}

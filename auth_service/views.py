@@ -6,28 +6,23 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.views import TokenRefreshView
 from django.utils.timezone import now
 from .models import User, BlacklistedAccessToken, UserDevice
-from qr_service.models import QRCode
+
+from shared.utils.api_exceptions import (
+    InvalidRequestException, AuthenticationException, BaseServiceException, ValidationException
+)
+
 from .serializers import (
     RegisterSerializer, VerifyOTPSerializer, AdminUserSerializer,
-    VerifyEmailOTPSerializer, EmailOTPSerializer, UpdateUserInfoSerializer, BlacklistedAccessTokenSerializer
+    VerifyEmailOTPSerializer, EmailOTPSerializer, BlacklistedAccessTokenSerializer, BaseUserSerializer, FlexibleUpdateUserInfoSerializer
 )
+from .services.registration_service import RegistrationService
 from .utils import send_otp_email, generate_otp
 from rest_framework_simplejwt.tokens import RefreshToken
 import random  # For generating the OTP
 from django.utils import timezone
-from django.db.models import Q
-from django.conf import settings
 from auth_service.services.firestore_service import create_user_in_firestore
-from common.authentication import generate_qr_code
 from django.db import transaction
 from .throttles import AuthThrottle
-from utils.response_structure import success_response, error_response
-from referral_service.models import ReferralRelationship
-from referral_service.utils.metrics import on_referral_verified
-from referral_service.utils.events import (
-    log_event,
-    EVENT_TYPE_EMAIL_VERIFIED
-)
 
 import logging
 
@@ -37,23 +32,21 @@ logger = logging.getLogger(__name__)
 
 class CustomTokenRefreshView(TokenRefreshView):
     def post(self, request, *args, **kwargs):
-        fcm_token = request.headers.get("FCM-TOKEN")
-        device_id = request.headers.get("DEVICE-ID")
+        fcm_token = request.headers.get("X-FCM-Token")
+        device_id = request.headers.get("X-Device-ID")
         refresh_token = request.data.get("refresh")
 
         if not fcm_token or not device_id:
-            return Response({
-                'message': 'Error',
-                'errors': {'device': 'FCM-TOKEN and DEVICE-ID headers are required'},
-                'status': status.HTTP_400_BAD_REQUEST
-            }, status=status.HTTP_400_BAD_REQUEST)
+            raise InvalidRequestException(
+                detail="FCM-TOKEN and DEVICE-ID headers are required",
+                context={'device': 'FCM-TOKEN and DEVICE-ID headers are required'}
+            )
 
         if not refresh_token:
-            return Response({
-                'message': 'Error',
-                'errors': {'refresh': 'Refresh token is required'},
-                'status': status.HTTP_400_BAD_REQUEST
-            }, status=status.HTTP_400_BAD_REQUEST)
+            raise InvalidRequestException(
+                detail="Refresh token is required",
+                context={'refresh': 'Refresh token is required'}
+            )
 
         try:
             refresh = RefreshToken(refresh_token)
@@ -61,11 +54,10 @@ class CustomTokenRefreshView(TokenRefreshView):
 
             device = UserDevice.objects.filter(user=user, device_id=device_id, fcm_token=fcm_token).first()
             if not device:
-                return Response({
-                    'message': 'Error',
-                    'errors': {'device': 'Device not recognized or unauthorized'},
-                    'status': status.HTTP_401_UNAUTHORIZED
-                }, status=status.HTTP_401_UNAUTHORIZED)
+                raise AuthenticationException(
+                    detail="Device not recognized or unauthorized",
+                    context={'device': 'Device not recognized or unauthorized'}
+                )
 
             # Blacklist old access token
             if device.last_access_token:
@@ -102,55 +94,32 @@ class CustomTokenRefreshView(TokenRefreshView):
             })
 
         except TokenError as e:
-            return Response({
-                'message': 'Error',
-                'errors': {'token': 'Invalid or expired refresh token'},
-                'status': status.HTTP_401_UNAUTHORIZED
-            }, status=status.HTTP_401_UNAUTHORIZED)
+            raise AuthenticationException(
+                detail="Invalid or expired refresh token",
+                context={'token': 'Invalid or expired refresh token'}
+            )
 
-class RegisterView(generics.CreateAPIView):
+
+# auth_service/views.py
+class RegisterView(APIView):
     permission_classes = [AllowAny]
     serializer_class = RegisterSerializer
 
-    def create(self, request, *args, **kwargs):
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email'].lower()
+
         try:
-            otp = str(random.randint(100000, 999999))  # Generate OTP
-            phone_number = request.data['phone_number']
-
-            user = User.objects.filter(phone_number=phone_number).first()
-            user_created = False
-
-            if user:
-                # Existing user flow
-                user.otp = otp
-                user.otp_expiry = now() + timezone.timedelta(minutes=5)
-                user.save()
-            else:
-                # New user flow
-                firebase_user_profile = create_user_in_firestore(phone_number)
-                user = User.objects.create(
-                    phone_number=phone_number,
-                    otp=otp,
-                    otp_expiry=now() + timezone.timedelta(minutes=5),
-                    user_id=firebase_user_profile['uid'],
-                    user_name=firebase_user_profile['username']
-                )
-                user_created = True
-
+            user, created = RegistrationService.register_user(email)
             return Response({
-                'phone_number': user.phone_number,
-                'otp': user.otp,
-                'message': 'New user created and OTP sent.' if user_created else 'OTP updated for existing phone number.',
-                'status': status.HTTP_201_CREATED if user_created else status.HTTP_200_OK
-            }, status=status.HTTP_201_CREATED if user_created else status.HTTP_200_OK)
-
+                'email': user.email,
+                'message': 'OTP sent to email. Please verify.'
+            }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         except Exception as e:
             logger.error(f"Registration failed: {str(e)}")
-            return Response({
-                'error': str(e),
-                'message': 'Something went wrong while registering.',
-                'status': status.HTTP_500_INTERNAL_SERVER_ERROR
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            raise BaseServiceException(detail="Registration failed", context={'error': str(e)})
+
 
 class VerifyOTPView(APIView):
     permission_classes = [AllowAny]
@@ -160,55 +129,50 @@ class VerifyOTPView(APIView):
     def post(self, request):
         """
         Verify OTP and complete user registration/login
-        Handles:
-        - OTP validation
-        - Device management
-        - Token generation
-        - Referral conversion tracking
-        - Reward granting
+        Handles both registration and login scenarios
         """
         serializer = VerifyOTPSerializer(data=request.data)
         if not serializer.is_valid():
-            return Response({
-                'message': 'Error',
-                'errors': serializer.errors,
-                'status': status.HTTP_400_BAD_REQUEST
-            }, status=status.HTTP_400_BAD_REQUEST)
+            raise ValidationException(
+                detail="Invalid OTP data",
+                context=serializer.errors
+            )
 
         user = serializer.validated_data["user"]
-        device_type = serializer.validated_data.get("device_type")
+        device_type = serializer.validated_data.get("device_type", "web")
+        os_version = serializer.validated_data.get("os_version", "")
         fcm_token = request.headers.get("X-FCM-Token")
         device_id = request.headers.get("X-Device-ID")
 
         if not fcm_token or not device_id:
-            print('FCM-TOKEN and DEVICE-ID headers are required')
-            return Response({
-                'message': 'Error',
-                'errors': {'headers': 'FCM-TOKEN and DEVICE-ID headers are required'},
-                'status': status.HTTP_400_BAD_REQUEST
-            }, status=status.HTTP_400_BAD_REQUEST)
+            raise InvalidRequestException(
+                detail="X-FCM-Token and X-Device-ID headers are required",
+                context={'headers': 'X-FCM-Token and X-Device-ID headers are required'}
+            )
 
         try:
-            # 1. Clean up old devices and tokens (existing logic preserved)
+            # Check if this is first login (registration) or subsequent login
+            is_first_login = not user.email_verified
+            user_created_recently = (timezone.now() - user.created_at).total_seconds() < 300  # Within 5 minutes
+
+            # 1. Clean up old devices and tokens
             with transaction.atomic():
                 self._cleanup_old_devices(user, device_id, fcm_token)
                 
-                # Save new device (existing logic preserved)
-                device, _ = UserDevice.objects.update_or_create(
+                # Save new device
+                device, device_created = UserDevice.objects.update_or_create(
                     user=user,
                     device_id=device_id,
                     defaults={
-                        "user": user,
                         'fcm_token': fcm_token,
                         'device_type': device_type,
-                        "device_id": device_id,
-                        'os_version': serializer.validated_data.get("os_version"),
+                        'os_version': os_version,
                         'ip_address': self.get_client_ip(request),
                         'last_active': timezone.now()
                     }
                 )
                 
-                # Generate tokens (existing logic preserved)
+                # Generate tokens
                 refresh = RefreshToken.for_user(user)
                 access = refresh.access_token
 
@@ -216,90 +180,163 @@ class VerifyOTPView(APIView):
                 device.last_refresh_token_jti = refresh['jti']
                 device.save()
 
-            # 2. Referral-related verification and metrics
-            referral_payload = {}
-            try:
-                relationship = ReferralRelationship.objects.select_for_update().filter(
-                    referred_user=user,
-                    status='pending'
-                ).first()
-                if relationship:
-                    print("Referral relationship found:", relationship)
-                    now = timezone.now()
-                    # Mark verification
-                    relationship.user_verified_at = now
-                    if relationship.created_at:
-                        delta = now - relationship.created_at
-                        relationship.days_to_verify = delta.days
-                    relationship.status = 'verified'
-                    relationship.save(update_fields=[
-                        'user_verified_at', 'days_to_verify', 'status', 'updated_at'
-                    ])
+                # Mark email as verified and clear OTP (only if not already verified)
+                if not user.email_verified:
+                    user.email_verified = True
+                    user.email_otp = None
+                    user.email_otp_expiry = None
+                    user.save()
 
-                    # Log email verified event
-                    log_event(
-                        user=user,
-                        event_type=EVENT_TYPE_EMAIL_VERIFIED,
-                        referral_relationship=relationship,
-                        referral_code=relationship.referral_code_used,
-                        metadata={'stage': 'otp_verified'},
-                        ip_address=self.get_client_ip(request),
-                        user_agent=request.META.get("HTTP_USER_AGENT", "")[:1000],
-                        device_type=device_type or ''
-                    )
+            # 2. Initialize call balance if first login
+            if is_first_login:
+                try:
+                    from platform_settings.services import CallBalanceService
+                    CallBalanceService.initialize_user_balance(user)
+                    logger.info(f"Initialized call balance for user {user.user_id}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize call balance for user {user.user_id}: {str(e)}")
 
-                    # Update internal metrics
-                    try:
-                        on_referral_verified(relationship)
-                    except Exception as e:
-                        logger.warning("Failed to update referral verified metrics: %s", str(e))
+            # 3. Process referral logic for new users
+            referral_data = {}
+            if is_first_login and hasattr(request, 'session'):
+                referral_data = self._process_pending_referral(user, request)
 
-                    # Optionally grant reward if such stub exists (skip if not configured)
-                    # This part can be replaced later with real reward service integration
-                    try:
-                        # placeholder: assume reward_granter is passed or globally available
-                        # e.g., basic_reward_granter(...)
-                        pass
-                    except Exception:
-                        pass
+            # 4. Send welcome email only for first-time registration
+            if is_first_login and user_created_recently:
+                try:
+                    from .utils import send_welcome_email
+                    send_welcome_email(user.email, user.get_full_name() or user.user_name)
+                    logger.info(f"Welcome email sent to new user: {user.email}")
+                except Exception as e:
+                    logger.warning(f"Failed to send welcome email: {str(e)}")
 
-                    # Prepare relationship for response
-                    from referral_service.api.v1.serializers.relationship_serializer import ReferralRelationshipSerializer
-                    referral_payload['referral_relationship'] = ReferralRelationshipSerializer(relationship).data
 
-            except Exception as e:
-                logger.exception("Referral verification path failed for user %s: %s", getattr(user, 'user_id', None), str(e))
-                # swallow to avoid blocking login
+            # 5. Fetch current balance
+            from platform_settings.services import CallBalanceService
+            current_balance = CallBalanceService.get_user_balance(user)
 
-            # 3. Get QR info (existing logic preserved)
-            qr_info = self._get_qr_info(user)
-
-            # 4. Build response (existing structure preserved + referral data)
+            # 6. Build response
             response_data = {
                 'access_token': str(access),
                 'refresh_token': str(refresh),
                 'user_id': user.user_id,
                 'user_name': user.user_name,
-                'email': user.email if user.email_verified else "",
+                'email': user.email,
                 'first_name': user.first_name or "",
                 'last_name': user.last_name or "",
+                'email_verified': user.email_verified,
+                'phone_verified': user.phone_verified,
                 'active_devices': user.devices.count(),
-                'qr': qr_info
+                'has_profile': bool(user.first_name and user.last_name),
+                'is_new_user': is_first_login,  # Indicate if this is a new user
+                'call_balance': {
+                    'base': str(current_balance.base_balance),
+                    'bonus': str(current_balance.bonus_balance),
+                    'total': str(current_balance.total_balance),
+                },
+                'referral_data': referral_data
             }
 
             return Response({
-                'message': 'Login successful',
+                'message': 'Registration successful' if is_first_login else 'Login successful',
                 'data': response_data,
                 'status': status.HTTP_200_OK
             })
 
+        except ValidationException:
+            raise
+        except AuthenticationException:
+            raise
         except Exception as e:
-            logger.exception(f"OTP verification failed for user {user.user_id}")
-            return Response({
-                'message': 'Error',
-                'errors': {'system': 'Login processing failed'},
-                'status': status.HTTP_500_INTERNAL_SERVER_ERROR
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.exception(f"Unexpected error during OTP verification: {str(e)}")
+            raise BaseServiceException(
+                detail="An unexpected error occurred during login",
+                context={'system': 'Internal server error'}
+            )
+
+    def _process_pending_referral(self, user, request):
+        """
+        Process any pending referral or campaign code from session
+        """
+        from referral_service.models import ReferralCode
+        referral_data = {}
+
+        # Check if session exists and has the required keys
+        if not hasattr(request, 'session'):
+            return referral_data
+
+        referral_code = request.session.get("pending_referral_code")
+        referrer_id = request.session.get("pending_referrer_id")
+        code_type = request.session.get("pending_code_type")
+        print(referral_code, referrer_id, code_type)
+        if referral_code and code_type:
+            try:
+                from referral_service.services import ReferralService, CampaignService
+
+                if code_type == "user" and referrer_id:
+                    # Handle normal referral
+                    referrer = User.objects.get(id=referrer_id)
+                    code, error = ReferralService.validate_referral_code(referral_code)
+                    if error:
+                        logger.warning(f"Invalid pending referral code {referral_code}: {error}")
+                        return referral_data
+
+                    relationship = ReferralService.create_referral_relationship(
+                        referrer, user, code
+                    )
+                    completed_relationship = ReferralService.complete_referral(relationship)
+
+                    referral_data = {
+                        "was_referred": True,
+                        "referrer_id": str(referrer.user_id),
+                        "referrer_email": referrer.email,
+                        "referral_code": code.code,
+                        "reward_given": float(completed_relationship.reward_calls_given),
+                        "relationship_id": str(relationship.id),
+                        "processed": "during_verification",
+                    }
+
+                elif code_type == "campaign":
+                    # Handle campaign code
+                    try:
+                        code = CampaignService.get_active_campaigns().get(code=referral_code)
+                    except ReferralCode.DoesNotExist:
+                        logger.warning(f"Invalid pending campaign code {referral_code}")
+                        return referral_data
+
+                    relationship = ReferralService.create_referral_relationship(
+                        None, user, code
+                    )
+                    completed_relationship = ReferralService.complete_referral(relationship)
+
+                    referral_data = {
+                        "was_referred": True,
+                        "referral_code": code.code,
+                        "reward_given": float(completed_relationship.reward_calls_given),
+                        "relationship_id": str(relationship.id),
+                        "processed": "during_verification",
+                        "campaign": True,
+                    }
+
+                logger.info(f"Pending {code_type} completed for user {user.user_id}")
+
+                # clear session
+                request.session.pop("pending_referral_code", None)
+                request.session.pop("pending_referrer_id", None)
+                request.session.pop("pending_code_type", None)
+                request.session.save()
+
+            except Exception as e:
+                logger.error(f"Failed to process pending {code_type}: {str(e)}")
+                referral_data = {
+                    "was_referred": True,
+                    "error": f"{code_type} processing failed",
+                    "referral_code": referral_code,
+                }
+
+        return referral_data
+
+    
 
     def _cleanup_old_devices(self, user, device_id, fcm_token):
         """Clean up old devices and blacklist tokens (existing logic)"""
@@ -328,16 +365,16 @@ class VerifyOTPView(APIView):
         UserDevice.objects.filter(device_id=device_id).delete()
         UserDevice.objects.filter(fcm_token=fcm_token).delete()
 
-    def _get_qr_info(self, user):
-        """Get QR code info (existing logic preserved)"""
-        qr_code = QRCode.objects.filter(user=user, is_active=True).first()
-        if qr_code:
-            return {
-                "domain": settings.BACKEND_URL,
-                "api_route": "/qr/scan-qr/",
-                "hashed_qr_id": str(generate_qr_code(qr_code.qr_id, qr_code.created_at))
-            }
-        return ''
+    # def _get_qr_info(self, user):
+    #     """Get QR code info (existing logic preserved)"""
+    #     qr_code = QRCode.objects.filter(user=user, is_active=True).first()
+    #     if qr_code:
+    #         return {
+    #             "domain": settings.BACKEND_URL,
+    #             "api_route": "/qr/scan-qr/",
+    #             "hashed_qr_id": str(generate_qr_code(qr_code.qr_id, qr_code.created_at))
+    #         }
+    #     return ''
 
     def get_client_ip(self, request):
         """Get client IP (existing logic preserved)"""
@@ -421,7 +458,7 @@ class VerifyOTPView(APIView):
 #                     # Log email verified event
 #                     log_event(
 #                         user=user,
-#                         event_type=EVENT_TYPE_EMAIL_VERIFIED,
+#                         event_type=EVENT_TYPE_USER_VERIFIED,
 #                         referral_relationship=relationship,
 #                         referral_code=relationship.referral_code_used,
 #                         metadata={'stage': 'otp_verified'},
@@ -577,10 +614,9 @@ class LogoutView(APIView):
                             status=status.HTTP_205_RESET_CONTENT)
 
         except Exception:
-            return Response(status=status.HTTP_400_BAD_REQUEST)
+            raise InvalidRequestException(detail="Invalid logout request")
 
 
-# Send Email OTP View (Sends OTP to user's email)
 class SendEmailOTPView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -604,7 +640,7 @@ class SendEmailOTPView(APIView):
             user.email_otp_expiry = timezone.now() + timezone.timedelta(minutes=10)
             user.save()
 
-            send_otp_email(email, otp)
+            send_otp_email(email, otp, user.user_name)
 
             return Response({
                 "data": None,
@@ -612,14 +648,12 @@ class SendEmailOTPView(APIView):
                 "status": status.HTTP_200_OK
             }, status=status.HTTP_200_OK)
 
-        return Response({
-            "error": serializer.errors,
-            "message": "Invalid email.",
-            "status": status.HTTP_400_BAD_REQUEST
-        }, status=status.HTTP_400_BAD_REQUEST)
+        raise ValidationException(
+            detail="Invalid email",
+            context=serializer.errors
+        )
 
 
-# Verify Email OTP View (Verifies the OTP entered by the user)
 class VerifyEmailOTPView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -639,35 +673,38 @@ class VerifyEmailOTPView(APIView):
                 "message": "Email already verified.",
                 "status": status.HTTP_200_OK
             }, status=status.HTTP_200_OK)
-        print(serializer.errors)
-        return Response({
-            "error": serializer.errors,
-            "message": "Invalid OTP.",
-            "status": status.HTTP_400_BAD_REQUEST
-        }, status=status.HTTP_400_BAD_REQUEST)
 
-    
+        raise ValidationException(
+            detail="Invalid OTP",
+            context=serializer.errors
+        )
+
+
 class UpdateUserInfoView(APIView):
     permission_classes = [IsAuthenticated]
-
-    def put(self, request):
-        serializer = UpdateUserInfoSerializer(data=request.data)
+    
+    def patch(self, request):
+        """
+        Partial update of user information - PATCH method
+        """
+        serializer = FlexibleUpdateUserInfoSerializer(
+            data=request.data,
+            context={'user': request.user}
+        )
 
         if serializer.is_valid():
-            user = request.user
-            serializer.update(user, serializer.validated_data)
-
+            user = serializer.update(request.user, serializer.validated_data)
+            
             return Response({
-                "data": None,
+                "data": BaseUserSerializer(user).data,
                 "message": "User information updated successfully.",
                 "status": status.HTTP_200_OK
             }, status=status.HTTP_200_OK)
 
-        return Response({
-            "error": serializer.errors,
-            "message": "Invalid data.",
-            "status": status.HTTP_400_BAD_REQUEST
-        }, status=status.HTTP_400_BAD_REQUEST)
+        raise ValidationException(
+            detail="Invalid data",
+            context=serializer.errors
+        )
 
 
 class AdminUserListView(APIView):

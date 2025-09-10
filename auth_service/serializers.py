@@ -6,33 +6,22 @@ class BaseUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 
-            'phone_number', 
-            'email', 
-            'first_name', 
-            'last_name',
-            'is_active'  # Added as it's commonly needed in many contexts
+            'id', 'user_id', 'phone_number', 'email', 'first_name', 'last_name',
+            'user_name', 'email_verified', 'phone_verified', 'is_active',
+            'call_balance', 'address', 'license_plate_number', 'vehicle_type',
+            'vehicle_model', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'is_active']
-        extra_kwargs = {
-            'email': {'required': True},
-            'phone_number': {'required': True}
-        }
+        read_only_fields = ['id', 'user_id', 'email_verified', 'phone_verified', 
+                          'created_at', 'updated_at', 'is_active']
 
 class AdminUserSerializer(BaseUserSerializer):
     class Meta(BaseUserSerializer.Meta):
         fields = BaseUserSerializer.Meta.fields + [
-            'email_verified', 
-            'is_staff',
-            'created_at', 
-            'updated_at',
-            'last_login'
+            'is_staff', 'is_superuser', 'last_login', 'otp', 'otp_expiry',
+            'email_otp', 'email_otp_expiry'
         ]
         read_only_fields = BaseUserSerializer.Meta.read_only_fields + [
-            'email_verified',
-            'created_at', 
-            'updated_at',
-            'last_login'
+            'last_login', 'otp', 'otp_expiry', 'email_otp', 'email_otp_expiry'
         ]
 
 class UserCreateSerializer(serializers.ModelSerializer):
@@ -58,35 +47,35 @@ class BlacklistedAccessTokenSerializer(serializers.ModelSerializer):
         model = BlacklistedAccessToken
         fields = ['id', 'token', 'created_at']
 
-class RegisterSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ['phone_number']
-
-    def validate_phone_number(self, value):
-        # Just validate the phone number format if needed, no uniqueness check
-        return value
+class RegisterSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+    
+    def validate_email(self, value):
+        
+        return value.lower()
 
 class VerifyOTPSerializer(serializers.Serializer):
-    phone_number = serializers.CharField()
+    email = serializers.EmailField()
     otp = serializers.CharField(min_length=6, max_length=6)
     device_type = serializers.ChoiceField(
         choices=UserDevice.DEVICE_TYPES,
         required=False
     )
-    os_version = serializers.CharField(required=False)
+    os_version = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
+        email = attrs['email'].lower()
+        otp = attrs['otp']
+        
         user = User.objects.filter(
-            phone_number=attrs['phone_number'],
-            otp=attrs['otp'],
-            otp_expiry__gt=now()
+            email=email,
+            email_otp=otp,
+            email_otp_expiry__gt=now()
         ).first()
 
         if not user:
             raise serializers.ValidationError("Invalid OTP or OTP expired.")
 
-        # Attach user to validated data
         attrs['user'] = user
         return attrs
 
@@ -135,12 +124,17 @@ class VerifyEmailOTPSerializer(serializers.Serializer):
             raise serializers.ValidationError("User with this email does not exist.")
 
 
-class UpdateUserInfoSerializer(serializers.Serializer):
-    first_name = serializers.CharField(max_length=50, required=True)
-    last_name = serializers.CharField(max_length=50, required=True)
+class FlexibleUpdateUserInfoSerializer(serializers.Serializer):
+    first_name = serializers.CharField(max_length=30, required=False, allow_blank=True)
+    last_name = serializers.CharField(max_length=30, required=False, allow_blank=True)
+    address = serializers.CharField(required=False, allow_blank=True)
+    license_plate_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    vehicle_type = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    vehicle_model = serializers.CharField(max_length=50, required=False, allow_blank=True)
 
     def update(self, instance, validated_data):
-        instance.first_name = validated_data.get('first_name', instance.first_name)
-        instance.last_name = validated_data.get('last_name', instance.last_name)
+        for attr, value in validated_data.items():
+            if value is not None:  # Update even if empty string
+                setattr(instance, attr, value)
         instance.save()
         return instance
