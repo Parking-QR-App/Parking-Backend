@@ -511,7 +511,51 @@ class DefaultSettings:
     
     _platform_setting = None
 
-    # ... DEFAULT_SETTINGS remain the same ...
+    DEFAULT_SETTINGS = [
+        # Call Management
+        {
+            'key': 'initial_call_balance',
+            'display_name': 'Initial Call Balance',
+            'description': 'Calls given to new users on registration',
+            'category': 'call_management',
+            'setting_type': 'decimal',
+            'decimal_value': Decimal('10.00')
+        },
+        {
+            'key': 'cron_reset_enabled',
+            'display_name': 'Cron Reset Enabled',
+            'description': 'Enable automatic call balance resets',
+            'category': 'call_management',
+            'setting_type': 'boolean',
+            'boolean_value': True
+        },
+        {
+            'key': 'cron_reset_frequency',
+            'display_name': 'Reset Frequency (Days)',
+            'description': 'How often to reset balances (7 = weekly)',
+            'category': 'call_management',
+            'setting_type': 'integer',
+            'integer_value': 7
+        },
+        {
+            'key': 'cron_reset_amount',
+            'display_name': 'Reset Amount',
+            'description': 'Calls to set during reset',
+            'category': 'call_management',
+            'setting_type': 'decimal',
+            'decimal_value': Decimal('5.00')
+        },
+        
+        # Referral System
+        {
+            'key': 'referral_reward_calls',
+            'display_name': 'Referral Reward Calls',
+            'description': 'Calls given for successful referrals',
+            'category': 'referral_system',
+            'setting_type': 'decimal',
+            'decimal_value': Decimal('5.00')
+        },
+    ]
 
     @classmethod
     def get_platform_setting_model(cls):

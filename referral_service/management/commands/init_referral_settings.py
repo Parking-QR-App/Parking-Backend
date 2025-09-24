@@ -13,8 +13,6 @@ class Command(BaseCommand):
 
         defaults = {
             'default_reward_calls': '5.00',
-            'allow_self_referral': 'false',
-            'max_user_codes': '1',
             'referral_code_length': '8',
         }
 
