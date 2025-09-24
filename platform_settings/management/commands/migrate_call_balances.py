@@ -6,7 +6,7 @@ from decimal import Decimal
 import logging
 
 from auth_service.models import User
-from platform_settings.services import CallBalanceService
+from platform_settings.services.settings_service import CallBalanceService
 from shared.utils.api_exceptions import ServiceUnavailableException, DataValidationException
 
 logger = logging.getLogger(__name__)

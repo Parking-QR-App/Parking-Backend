@@ -229,6 +229,28 @@ class PermissionDeniedException(BaseServiceException):
     default_detail = "You do not have permission to perform this action"
     status_code = status.HTTP_403_FORBIDDEN
 
+# ------------------------
+# Email / SMTP
+# ------------------------
+class EmailServiceUnavailableException(ServiceUnavailableException):
+    """
+    Email service is down or unreachable (SMTP connection failures, timeouts).
+    503 indicates a temporary service outage.
+    """
+    default_code = 'email_service_unavailable'
+    default_detail = 'Email service is temporarily unavailable'
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+class EmailSendFailedException(BaseServiceException):
+    """
+    Email send failed due to permanent errors (invalid address, rejected, quota).
+    502 is appropriate when an upstream dependency rejected the request.
+    """
+    default_code = 'email_send_failed'
+    default_detail = 'Failed to send email'
+    status_code = status.HTTP_502_BAD_GATEWAY
+
 # ==================== REWARD-SPECIFIC EXCEPTIONS ====================
 
 class RewardValidationException(ValidationException):

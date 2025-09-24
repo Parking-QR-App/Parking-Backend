@@ -11,7 +11,7 @@ from .serializers import (
     UserCallBalanceSerializer, BalanceResetLogSerializer,
     BulkBalanceUpdateSerializer, CronExecutionSerializer
 )
-from .services import SettingsService, CallBalanceService, DefaultSettings
+from .services.settings_service import SettingsService, CallBalanceService, DefaultSettings
 from auth_service.models import User
 
 class PlatformSettingListView(generics.ListAPIView):

@@ -138,7 +138,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         This is a computed property, not stored in User model
         """
         try:
-            from platform_settings.services import CallBalanceService
+            from platform_settings.services.settings_service import CallBalanceService
             balance = CallBalanceService.get_user_balance(self)
             return balance.total_balance
         except Exception as e:
@@ -150,7 +150,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         Add referral reward calls to user's bonus balance
         """
         try:
-            from platform_settings.services import CallBalanceService
+            from platform_settings.services.settings_service import CallBalanceService
             CallBalanceService.add_referral_reward(self, Decimal(str(amount)))
             return True
         except Exception as e:
@@ -165,7 +165,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         Deduct calls from user's balance (for making calls)
         """
         try:
-            from platform_settings.services import CallBalanceService
+            from platform_settings.services.settings_service import CallBalanceService
             balance = CallBalanceService.get_user_balance(self)
             
             # First try to deduct from bonus balance

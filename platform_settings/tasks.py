@@ -1,5 +1,5 @@
 from celery import shared_task
-from .services import CallBalanceService
+from .services.settings_service import CallBalanceService
 
 @shared_task
 def automated_balance_reset():

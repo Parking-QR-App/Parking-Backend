@@ -4,7 +4,7 @@ import logging
 
 from platform_settings.models import PlatformSetting
 from shared.utils.api_exceptions import ServiceUnavailableException, DataValidationException
-from platform_settings.services import DefaultSettings
+from platform_settings.services.settings_service import DefaultSettings
 logger = logging.getLogger(__name__)
 
 class Command(BaseCommand):

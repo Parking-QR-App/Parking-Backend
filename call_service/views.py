@@ -6,9 +6,6 @@ from django.core.cache import cache
 from rest_framework import status, generics
 from django.db.models import Q, Sum, Count, Avg
 from decimal import Decimal
-from django.shortcuts import get_object_or_404
-from rest_framework.response import Response
-
 from .services.call_service import CallService, CallAnalyticsService
 from .models import CallRecord
 from .serializers import (
@@ -16,10 +13,12 @@ from .serializers import (
     CallAnalyticsSerializer, CallDetailSerializer
 )
 from shared.utils.api_exceptions import (
-    InvalidRequestException, ResourceNotFoundException,
+    InvalidRequestException,
     ServiceUnavailableException, ValidationException,
-    PermissionDeniedException
+    NotFoundException, AuthorizationException, InsufficientBalanceException
 )
+from .services.model_import_service import CallModelService
+from django.db import DatabaseError
 from utils.response_structure import success_response
 import logging
 
@@ -92,9 +91,9 @@ class CallEventAPIView(APIView):
         try:
             event_name = request.data.get("event")
             if not event_name:
-                raise InvalidRequestException(
-                    detail="Missing event parameter",
-                    context={'required_field': 'event'}
+                raise ValidationException(  # 400 - Input validation error
+                    detail="Missing required parameter",
+                    context={'event': 'Event parameter is required'}
                 )
 
             valid_events = [
@@ -106,9 +105,12 @@ class CallEventAPIView(APIView):
             ]
             
             if event_name not in valid_events:
-                raise ValidationException(
+                raise ValidationException(  # Correct - 400
                     detail="Invalid event type",
-                    context={'event_name': event_name, 'valid_events': valid_events}
+                    context={
+                        'event': f"'{event_name}' is not a valid event type",
+                        'valid_events': valid_events
+                    }
                 )
 
             service = CallService(request.user)
@@ -129,25 +131,19 @@ class CallEventAPIView(APIView):
                 status=status.HTTP_200_OK
             )
 
-        except Throttled as e:
-            return Response({
-                'error': 'Too many requests',
-                'message': 'Please wait before making more calls',
-                'retry_after': e.wait or 30
-            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-        except ValidationException as e:
-            raise
-        except ResourceNotFoundException as e:
-            raise
+        except ValidationException:
+            raise  # Re-raise validation errors
+        except NotFoundException:
+            raise  # Re-raise not found errors
+        except InsufficientBalanceException:
+            raise  # Re-raise business logic errors
         except Exception as e:
-            logger.error(f"Failed to process call event: {str(e)}")
-            raise ServiceUnavailableException(
-                detail="Unable to process call event",
+            logger.error(f"Call event processing failed: {str(e)}", exc_info=True)
+            raise ServiceUnavailableException(  # 503 for service issues
+                detail="Call event processing temporarily unavailable",
                 context={
-                    'error': str(e),
                     'event_name': event_name,
-                    'user_id': str(request.user.user_id)
+                    'user_message': 'Unable to process call event. Please try again.'
                 }
             )
             
@@ -156,38 +152,39 @@ class CallRatingAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        serializer = CallRatingSerializer(data=request.data)
+        if not serializer.is_valid():
+            raise ValidationException(
+                detail="Rating validation failed",
+                context=serializer.errors
+            )
+        
+        data = serializer.validated_data
+        call_id = data['call_id']
+        rating = data['rating']
+        feedback = data.get('feedback', '')
+        CallRecord = CallModelService.get_call_record_model()
+        
+        # Get call record
         try:
-            serializer = CallRatingSerializer(data=request.data)
-            if not serializer.is_valid():
-                raise ValidationException(
-                    detail="Invalid rating data",
-                    context=serializer.errors
-                )
-            
-            data = serializer.validated_data
-            call_id = data['call_id']
-            rating = data['rating']
-            feedback = data.get('feedback', '')
-            
-            # Get call record
-            try:
-                call = CallRecord.objects.get(call_id=call_id)
-            except CallRecord.DoesNotExist:
-                raise ResourceNotFoundException(
-                    detail="Call not found",
-                    context={'call_id': call_id}
-                )
-            
-            # Check if user participated in this call
-            if request.user not in [call.inviter, call.invitee]:
-                raise PermissionDeniedException(
-                    detail="User did not participate in this call",
-                    context={
-                        'call_id': call_id,
-                        'user_id': str(request.user.user_id)
-                    }
-                )
-            
+            call = CallRecord.objects.get(call_id=call_id)
+        except CallRecord.DoesNotExist:
+            raise NotFoundException(
+                detail="Call not found",
+                context={'call_id': f'No call found with ID: {call_id}'}
+            )
+        
+        # Check if user participated in this call
+        if request.user not in [call.inviter, call.invitee]:
+            raise AuthorizationException(
+                detail="Access denied to this call",
+                context={
+                    'call_id': call_id,
+                    'reason': 'User did not participate in this call'
+                }
+            )
+        
+        try:
             # Update rating based on user role
             if request.user == call.inviter:
                 call.inviter_rating = rating
@@ -213,15 +210,12 @@ class CallRatingAPIView(APIView):
                 status=status.HTTP_200_OK
             )
             
-        except ValidationException:
-            raise
         except Exception as e:
-            logger.error(f"Failed to submit call rating: {str(e)}")
+            logger.error(f"Call rating submission failed: {str(e)}", exc_info=True)
             raise ServiceUnavailableException(
-                detail="Failed to submit call rating",
+                detail="Rating service temporarily unavailable",
                 context={
-                    'error': str(e),
-                    'call_id': request.data.get('call_id', 'unknown')
+                    'user_message': 'Unable to submit rating. Please try again.'
                 }
             )
 
@@ -232,6 +226,7 @@ class CallAnalyticsAPIView(APIView):
     def get(self, request):
         try:
             stats = CallAnalyticsService.get_user_call_stats(request.user.user_id)
+            CallRecord = CallModelService.get_call_record_model()
             
             # Calculate cost analytics
             cost_stats = CallRecord.objects.filter(
@@ -258,15 +253,20 @@ class CallAnalyticsAPIView(APIView):
                 status=status.HTTP_200_OK
             )
             
-        except Exception as e:
-            logger.error(f"Failed to retrieve call analytics: {str(e)}")
+        except DatabaseError as e:  # Database-specific errors
+            logger.error(f"Database error retrieving analytics: {str(e)}")
             raise ServiceUnavailableException(
-                detail="Failed to retrieve call analytics",
+                detail="Analytics database temporarily unavailable"
+            )
+        except Exception as e:
+            logger.error(f"Analytics retrieval failed: {str(e)}", exc_info=True)
+            raise ServiceUnavailableException(
+                detail="Analytics service temporarily unavailable",
                 context={
-                    'error': str(e),
-                    'user_id': str(request.user.user_id)
+                    'user_message': 'Unable to load analytics. Please try again.'
                 }
             )
+
 
 class CallHistoryAPIView(generics.ListAPIView):
     """Get call history for authenticated user"""
@@ -274,9 +274,16 @@ class CallHistoryAPIView(generics.ListAPIView):
     serializer_class = CallRecordSerializer
     
     def get_queryset(self):
-        return CallRecord.objects.filter(
-            Q(inviter=self.request.user) | Q(invitee=self.request.user)
-        ).select_related('inviter', 'invitee').order_by('-initiated_at')
+        try:
+            CallRecord = CallModelService.get_call_record_model()
+            return CallRecord.objects.filter(
+                Q(inviter=self.request.user) | Q(invitee=self.request.user)
+            ).select_related('inviter', 'invitee').order_by('-initiated_at')
+        except DatabaseError as e:
+            logger.error(f"Database error in call history queryset: {str(e)}")
+            raise ServiceUnavailableException(
+                detail="Call history database temporarily unavailable"
+            )
     
     def list(self, request, *args, **kwargs):
         try:
@@ -294,13 +301,14 @@ class CallHistoryAPIView(generics.ListAPIView):
                 status=status.HTTP_200_OK
             )
             
+        except ServiceUnavailableException:
+            raise  # Re-raise from get_queryset
         except Exception as e:
-            logger.error(f"Failed to retrieve call history: {str(e)}")
+            logger.error(f"Call history retrieval failed: {str(e)}", exc_info=True)
             raise ServiceUnavailableException(
-                detail="Failed to retrieve call history",
+                detail="Call history service temporarily unavailable",
                 context={
-                    'error': str(e),
-                    'user_id': str(request.user.user_id)
+                    'user_message': 'Unable to load call history. Please try again.'
                 }
             )
 
@@ -309,20 +317,36 @@ class CallDetailAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, call_id):
-        try:
-            call = get_object_or_404(
-                CallRecord.objects.select_related('inviter', 'invitee')
-                                   .prefetch_related('event_logs'),
-                call_id=call_id
+        # Validate call_id format
+        if not call_id or len(call_id.strip()) < 1:
+            raise ValidationException(
+                detail="Invalid call ID format",
+                context={'call_id': 'Call ID is required and cannot be empty'}
             )
+
+        CallRecord = CallModelService.get_call_record_model()
+        try:
+            call = CallRecord.objects.select_related('inviter', 'invitee')\
+                                   .prefetch_related('event_logs')\
+                                   .get(call_id=call_id)
             
-            # Check if user has permission to view this call
-            if request.user not in [call.inviter, call.invitee]:
-                raise PermissionDeniedException(
-                    detail="You don't have permission to view this call",
-                    context={'call_id': call_id}
-                )
-            
+        except CallRecord.DoesNotExist:
+            raise NotFoundException(  # Fixed - use NotFoundException (404)
+                detail="Call not found",
+                context={'call_id': f'No call found with ID: {call_id}'}
+            )
+        
+        # Check if user has permission to view this call
+        if request.user not in [call.inviter, call.invitee]:
+            raise AuthorizationException(  # Fixed - use AuthorizationException (403)
+                detail="Access denied to this call",
+                context={
+                    'call_id': call_id,
+                    'reason': 'User did not participate in this call'
+                }
+            )
+        
+        try:
             serializer = CallDetailSerializer(call)
             
             return success_response(
@@ -331,18 +355,12 @@ class CallDetailAPIView(APIView):
                 status=status.HTTP_200_OK
             )
             
-        except CallRecord.DoesNotExist:
-            raise ResourceNotFoundException(
-                detail="Call not found",
-                context={'call_id': call_id}
-            )
         except Exception as e:
-            logger.error(f"Failed to retrieve call details: {str(e)}")
+            logger.error(f"Call detail serialization failed: {str(e)}", exc_info=True)
             raise ServiceUnavailableException(
-                detail="Failed to retrieve call details",
+                detail="Call detail service temporarily unavailable",
                 context={
-                    'error': str(e),
-                    'call_id': call_id
+                    'user_message': 'Unable to load call details. Please try again.'
                 }
             )
 

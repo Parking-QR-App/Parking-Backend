@@ -6,10 +6,24 @@ import uuid
 import string
 import random
 from decimal import Decimal
+from django.apps import apps
+import logging
+logger = logging.getLogger(__name__)
 
 def generate_referral_code():
-    """Generate a unique 8-character referral code"""
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    ReferralSettings = apps.get_model('referral_service', 'ReferralSettings')
+    setting = ReferralSettings.objects.filter(key='referral_code_length', is_active=True).first()
+    length = int(setting.value) if setting and setting.value.isdigit() else 8
+
+    ReferralCode = apps.get_model('referral_service', 'ReferralCode')
+
+    for _ in range(5):  # Try 5 times to avoid collision
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+        if not ReferralCode.objects.filter(code=code).exists():
+            return code
+
+    logger.warning("Could not find unique referral code after 5 attempts")
+    return code  # Return last attempt anyway
 
 class ReferralCode(models.Model):
     """

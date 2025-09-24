@@ -5,11 +5,19 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.views import TokenRefreshView
 from django.utils.timezone import now
-from .models import User, BlacklistedAccessToken, UserDevice
-
+from .models import User, BlacklistedAccessToken
+from django.conf import settings
+from django.core.exceptions import ValidationError
+import smtplib
 from shared.utils.api_exceptions import (
-    InvalidRequestException, AuthenticationException, BaseServiceException, ValidationException, ResourceNotFoundException
+    AuthenticationException, ValidationException,
+    ServiceUnavailableException, EmailServiceUnavailableException,
+    EmailSendFailedException, ConflictException, NotFoundException
 )
+from .services.model_import_service import AuthService
+from referral_service.services.model_import_service import ReferralModelService
+from platform_settings.services.import_service import CallBalanceServiceLoader
+from referral_service.services.import_service import ReferralServiceLoader
 
 from .serializers import (
     RegisterSerializer, VerifyOTPSerializer, AdminUserSerializer,
@@ -18,33 +26,24 @@ from .serializers import (
 from .services.registration_service import RegistrationService
 from .utils import send_otp_email, generate_otp
 from rest_framework_simplejwt.tokens import RefreshToken
-import random  # For generating the OTP
 from django.utils import timezone
-from auth_service.services.firestore_service import create_user_in_firestore
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from .throttles import AuthThrottle
+
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-
-
 class CustomTokenRefreshView(TokenRefreshView):
     def post(self, request, *args, **kwargs):
-        fcm_token = request.headers.get("X-FCM-Token")
-        device_id = request.headers.get("X-Device-ID")
         refresh_token = request.data.get("refresh")
-
-        if not fcm_token or not device_id:
-            raise InvalidRequestException(
-                detail="FCM-TOKEN and DEVICE-ID headers are required",
-                context={'device': 'FCM-TOKEN and DEVICE-ID headers are required'}
-            )
+        BlacklistedAccessToken = AuthService.get_blacklisted_access_token_model()
+        UserDevice = AuthService.get_user_device_model()
 
         if not refresh_token:
-            raise InvalidRequestException(
-                detail="Refresh token is required",
+            raise ValidationException(
+                detail="Missing refresh token",
                 context={'refresh': 'Refresh token is required'}
             )
 
@@ -52,76 +51,152 @@ class CustomTokenRefreshView(TokenRefreshView):
             refresh = RefreshToken(refresh_token)
             user = refresh.user
 
-            device = UserDevice.objects.filter(user=user, device_id=device_id, fcm_token=fcm_token).first()
-            if not device:
-                raise AuthenticationException(
-                    detail="Device not recognized or unauthorized",
-                    context={'device': 'Device not recognized or unauthorized'}
-                )
+            # Get device info from headers (validated by middleware)
+            device_id = request.headers.get("X-Device-ID")
+            fcm_token = request.headers.get("X-FCM-Token")
 
-            # Blacklist old access token
-            if device.last_access_token:
+            # Find the device (should exist due to middleware validation)
+            device = None
+            if device_id:
+                try:
+                    device = UserDevice.objects.get(user=user, device_id=device_id)
+                except UserDevice.DoesNotExist:
+                    # This shouldn't happen if middleware is working correctly
+                    logger.warning(f"Device not found for user {user.id} with device_id {device_id}")
+
+            # Blacklist old access token if device tracking is available
+            if device and device.last_access_token:
                 try:
                     BlacklistedAccessToken.objects.get_or_create(
                         token=device.last_access_token,
                         user=user
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to blacklist old access token: {str(e)}")
 
             # Blacklist the used refresh token
             try:
                 refresh.blacklist()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to blacklist refresh token: {str(e)}")
 
+            # Generate new tokens
             new_refresh = RefreshToken.for_user(user)
             new_access = new_refresh.access_token
 
-            # Update device
-            device.last_refresh_token_jti = new_refresh['jti']
-            device.last_access_token = str(new_access)
-            device.last_active = now()
-            device.save()
+            # Update device tracking if device exists
+            if device:
+                try:
+                    device.last_refresh_token_jti = new_refresh['jti']
+                    device.last_access_token = str(new_access)
+                    device.last_active = timezone.now()
+                    if fcm_token:
+                        device.fcm_token = fcm_token
+                    device.save()
+                except Exception as e:
+                    logger.warning(f"Failed to update device info: {str(e)}")
 
             return Response({
-                'message': 'Token refreshed',
+                'message': 'Token refreshed successfully',
                 'data': {
-                    'access_token': str(new_access),
-                    'refresh_token': str(new_refresh),
+                    'access': str(new_access),
+                    'refresh': str(new_refresh),
+                    'access_expires_in': settings.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME'].total_seconds(),
+                    'refresh_expires_in': settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds(),
                 },
                 'status': status.HTTP_200_OK
-            })
+            }, status=status.HTTP_200_OK)
 
         except TokenError as e:
             raise AuthenticationException(
-                detail="Invalid or expired refresh token",
-                context={'token': 'Invalid or expired refresh token'}
+                detail="Token authentication failed",
+                context={'refresh_token': 'Invalid or expired refresh token'}
+            )
+        except Exception as e:
+            logger.error(f"Token refresh failed: {str(e)}", exc_info=True)
+            raise ServiceUnavailableException(
+                detail="Token refresh service temporarily unavailable"
             )
 
 
-# auth_service/views.py
 class RegisterView(APIView):
+    """Registration for regular users only"""
     permission_classes = [AllowAny]
     serializer_class = RegisterSerializer
 
     def post(self, request):
         serializer = self.serializer_class(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data['email'].lower()
+        if not serializer.is_valid():
+            raise ValidationException(
+                detail="Registration validation failed",
+                context=serializer.errors
+            )
+
+        email = serializer.validated_data['email'].lower().strip()
 
         try:
             user, created = RegistrationService.register_user(email)
-            return Response({
-                'email': user.email,
-                'message': 'OTP sent to email. Please verify.'
-            }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
-        except Exception as e:
-            logger.error(f"Registration failed: {str(e)}")
-            raise BaseServiceException(detail="Registration failed", context={'error': str(e)})
 
+            return Response({
+                'message': 'Registration successful. OTP sent to email.',
+                'data': {
+                    'email': user.email,
+                    'user_id': user.user_id,
+                    'is_new_user': created
+                },
+                'status': status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+        except ValidationError as ve:
+            raise ValidationException(
+                detail="Registration validation failed",
+                context={'email': str(ve)}
+            )
+        except IntegrityError:
+            raise ConflictException(
+                detail="User already exists",
+                context={'email': 'This email is already registered'}
+            )
+
+        # SMTP transport/provider outages (retryable, 503)
+        except (smtplib.SMTPConnectError,
+                smtplib.SMTPServerDisconnected,
+                smtplib.SMTPHeloError,
+                smtplib.SMTPAuthenticationError,
+                TimeoutError) as e:
+            logger.error(f"SMTP transport error for email {email}: {e}", exc_info=True)
+            raise EmailServiceUnavailableException(
+                detail="Email service temporarily unavailable",
+                context={'email': email, 'reason': e.__class__.__name__}
+            )
+
+        # Upstream rejected the message (non-retryable now, 502)
+        except (smtplib.SMTPSenderRefused,
+                smtplib.SMTPRecipientsRefused,
+                smtplib.SMTPDataError) as e:
+            logger.warning(f"Email send rejected for {email}: {e}", exc_info=True)
+            raise EmailSendFailedException(
+                detail="Failed to send verification email",
+                context={'email': email, 'reason': e.__class__.__name__}
+            )
+
+        # Generic SMTP error fallback
+        except smtplib.SMTPException as e:
+            logger.error(f"SMTP error for {email}: {e}", exc_info=True)
+            raise EmailServiceUnavailableException(
+                detail="Email service temporarily unavailable",
+                context={'email': email, 'reason': 'SMTPException'}
+            )
+
+        except Exception as e:
+            logger.error(f"Registration failed for email {email}: {str(e)}", exc_info=True)
+            raise ServiceUnavailableException(
+                detail="Registration service temporarily unavailable",
+                context={'service': 'Unable to process registration at this time'}
+            )
 
 class VerifyOTPView(APIView):
+    """OTP verification for regular users only"""
     permission_classes = [AllowAny]
     throttle_classes = [AuthThrottle]
 
@@ -132,10 +207,23 @@ class VerifyOTPView(APIView):
         Handles both registration and login scenarios
         """
         serializer = VerifyOTPSerializer(data=request.data)
+        
+        # Enhanced validation with proper exception usage
         if not serializer.is_valid():
+            # Transform Django validation errors to consistent format
+            field_errors = {}
+            for field, errors in serializer.errors.items():
+                if isinstance(errors, list):
+                    field_errors[field] = [str(error) for error in errors]
+                else:
+                    field_errors[field] = [str(errors)]
+            
             raise ValidationException(
-                detail="Invalid OTP data",
-                context=serializer.errors
+                detail="Please check your input and try again",  # User-friendly message
+                context={
+                    "fields": field_errors,
+                    "suggestion": "Review the highlighted fields and try again"
+                }
             )
 
         user = serializer.validated_data["user"]
@@ -144,16 +232,50 @@ class VerifyOTPView(APIView):
         fcm_token = request.headers.get("X-FCM-Token")
         device_id = request.headers.get("X-Device-ID")
 
-        if not fcm_token or not device_id:
-            raise InvalidRequestException(
-                detail="X-FCM-Token and X-Device-ID headers are required",
-                context={'headers': 'X-FCM-Token and X-Device-ID headers are required'}
+        # Enhanced device validation with proper exceptions
+        missing_headers = []
+        if not fcm_token:
+            missing_headers.append("X-FCM-Token")
+        if not device_id:
+            missing_headers.append("X-Device-ID")
+            
+        if missing_headers:
+            raise ValidationException(
+                detail="Device information is required to continue",
+                context={
+                    "missing_headers": missing_headers,
+                    "suggestion": "Please ensure your app has necessary permissions and try again"
+                }
+            )
+
+        # Validate device ID format
+        if len(device_id) < 5 or len(device_id) > 255:
+            raise ValidationException(
+                detail="Invalid device identification",
+                context={
+                    "field": "device_id",
+                    "requirement": "Must be 5-255 characters",
+                    "suggestion": "Please restart the app or reinstall if issue persists"
+                }
+            )
+
+        # Validate FCM token format
+        if len(fcm_token) < 10:
+            raise ValidationException(
+                detail="Invalid notification configuration", 
+                context={
+                    "field": "fcm_token",
+                    "requirement": "Must be at least 10 characters",
+                    "suggestion": "Check your app's notification settings"
+                }
             )
 
         try:
             # Check if this is first login (registration) or subsequent login
+            CallBalanceService = CallBalanceServiceLoader.get_call_balance_service()
+            UserDevice = AuthService.get_user_device_model()
             is_first_login = not user.email_verified
-            user_created_recently = (timezone.now() - user.created_at).total_seconds() < 300  # Within 5 minutes
+            user_created_recently = (timezone.now() - user.created_at).total_seconds() < 300
 
             # 1. Clean up old devices and tokens
             with transaction.atomic():
@@ -190,11 +312,11 @@ class VerifyOTPView(APIView):
             # 2. Initialize call balance if first login
             if is_first_login:
                 try:
-                    from platform_settings.services import CallBalanceService
                     CallBalanceService.initialize_user_balance(user)
                     logger.info(f"Initialized call balance for user {user.user_id}")
                 except Exception as e:
                     logger.error(f"Failed to initialize call balance for user {user.user_id}: {str(e)}")
+                    # Don't fail the entire process for balance initialization failure
 
             # 3. Process referral logic for new users
             referral_data = {}
@@ -209,13 +331,12 @@ class VerifyOTPView(APIView):
                     logger.info(f"Welcome email sent to new user: {user.email}")
                 except Exception as e:
                     logger.warning(f"Failed to send welcome email: {str(e)}")
-
+                    # Don't fail for email sending issues
 
             # 5. Fetch current balance
-            from platform_settings.services import CallBalanceService
             current_balance = CallBalanceService.get_user_balance(user)
 
-            # 6. Build response
+            # 6. Build consistent success response
             response_data = {
                 'access_token': str(access),
                 'refresh_token': str(refresh),
@@ -228,62 +349,76 @@ class VerifyOTPView(APIView):
                 'phone_verified': user.phone_verified,
                 'active_devices': user.devices.count(),
                 'has_profile': bool(user.first_name and user.last_name),
-                'is_new_user': is_first_login,  # Indicate if this is a new user
+                'is_new_user': is_first_login,
                 'call_balance': {
-                    'base': str(current_balance.base_balance),
-                    'bonus': str(current_balance.bonus_balance),
-                    'total': str(current_balance.total_balance),
+                    'base': float(current_balance.base_balance),
+                    'bonus': float(current_balance.bonus_balance),
+                    'total': float(current_balance.total_balance),
                 },
                 'referral_data': referral_data
             }
 
             return Response({
-                'message': 'Registration successful' if is_first_login else 'Login successful',
+                'success': True,
+                'message': 'Registration completed successfully' if is_first_login else 'Login successful',
                 'data': response_data,
-                'status': status.HTTP_200_OK
-            })
+                'timestamp': timezone.now().isoformat()
+            }, status=status.HTTP_200_OK)
 
         except ValidationException:
             raise
         except AuthenticationException:
             raise
+        except IntegrityError as e:
+            logger.error(f"Database integrity error during OTP verification: {str(e)}")
+            raise ConflictException(
+                detail="We encountered an issue setting up your account",
+                context={
+                    "suggestion": "Please try again in a few moments"
+                }
+            )
         except Exception as e:
             logger.exception(f"Unexpected error during OTP verification: {str(e)}")
-            raise BaseServiceException(
-                detail="An unexpected error occurred during login",
-                context={'system': 'Internal server error'}
+            raise ServiceUnavailableException(
+                detail="Our service is temporarily unavailable",
+                context={
+                    "suggestion": "Please try again in 30 seconds",
+                    "retry_after": 30
+                }
             )
 
     def _process_pending_referral(self, user, request):
-        """
-        Process any pending referral or campaign code from session
-        """
-        from referral_service.models import ReferralCode
+        """Process any pending referral or campaign code from session"""
+        ReferralCode = ReferralModelService.get_referral_code_model()
         referral_data = {}
+        User = AuthService.get_user_model()
 
-        # Check if session exists and has the required keys
         if not hasattr(request, 'session'):
             return referral_data
 
         referral_code = request.session.get("pending_referral_code")
         referrer_id = request.session.get("pending_referrer_id")
         code_type = request.session.get("pending_code_type")
-        print(referral_code, referrer_id, code_type)
+
         if referral_code and code_type:
             try:
-                from referral_service.services import ReferralService, CampaignService
+                ReferralService = ReferralServiceLoader.get_referral_service()
+                CampaignService = ReferralServiceLoader.get_campaign_service()
 
                 if code_type == "user" and referrer_id:
                     # Handle normal referral
-                    referrer = User.objects.get(id=referrer_id)
+                    try:
+                        referrer = User.objects.get(id=referrer_id)
+                    except User.DoesNotExist:
+                        logger.warning(f"Referrer not found: {referrer_id}")
+                        return referral_data
+
                     code, error = ReferralService.validate_referral_code(referral_code)
                     if error:
                         logger.warning(f"Invalid pending referral code {referral_code}: {error}")
                         return referral_data
 
-                    relationship = ReferralService.create_referral_relationship(
-                        referrer, user, code
-                    )
+                    relationship = ReferralService.create_referral_relationship(referrer, user, code)
                     completed_relationship = ReferralService.complete_referral(relationship)
 
                     referral_data = {
@@ -304,9 +439,7 @@ class VerifyOTPView(APIView):
                         logger.warning(f"Invalid pending campaign code {referral_code}")
                         return referral_data
 
-                    relationship = ReferralService.create_referral_relationship(
-                        None, user, code
-                    )
+                    relationship = ReferralService.create_referral_relationship(None, user, code)
                     completed_relationship = ReferralService.complete_referral(relationship)
 
                     referral_data = {
@@ -320,10 +453,9 @@ class VerifyOTPView(APIView):
 
                 logger.info(f"Pending {code_type} completed for user {user.user_id}")
 
-                # clear session
-                request.session.pop("pending_referral_code", None)
-                request.session.pop("pending_referrer_id", None)
-                request.session.pop("pending_code_type", None)
+                # Clear session
+                for key in ["pending_referral_code", "pending_referrer_id", "pending_code_type"]:
+                    request.session.pop(key, None)
                 request.session.save()
 
             except Exception as e:
@@ -336,286 +468,127 @@ class VerifyOTPView(APIView):
 
         return referral_data
 
-    
-
     def _cleanup_old_devices(self, user, device_id, fcm_token):
-        """Clean up old devices and blacklist tokens (existing logic)"""
-        # Remove old device and blacklist tokens
-        old_device = user.devices.first()
-        if old_device:
-            # Blacklist the old access token in your model
-            if old_device.last_access_token:
-                print(old_device.last_access_token)
-                try:
-                    BlacklistedAccessToken.objects.get_or_create(
-                        token=old_device.last_access_token,
-                        user=user
-                    )
-                except Exception:
-                    pass
+        """Clean up old devices and blacklist tokens"""
+        BlacklistedAccessToken = AuthService.get_blacklisted_access_token_model()
+        UserDevice = AuthService.get_user_device_model()
+        
+        try:
+            # Get and cleanup old devices
+            old_devices = user.devices.exclude(device_id=device_id)
+            for old_device in old_devices:
+                if old_device.last_access_token:
+                    try:
+                        BlacklistedAccessToken.objects.get_or_create(
+                            token=old_device.last_access_token,
+                            user=user
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to blacklist access token: {str(e)}")
 
-            # Blacklist refresh token (SimpleJWT built-in)
-            if old_device.last_refresh_token_jti:
-                from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
-                BlacklistedToken.objects.filter(token__jti=old_device.last_refresh_token_jti).delete()
-                OutstandingToken.objects.filter(jti=old_device.last_refresh_token_jti).delete()
+                # Blacklist refresh token
+                if old_device.last_refresh_token_jti:
+                    try:
+                        from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+                        outstanding_token = OutstandingToken.objects.filter(jti=old_device.last_refresh_token_jti).first()
+                        if outstanding_token:
+                            BlacklistedToken.objects.get_or_create(token=outstanding_token)
+                    except Exception as e:
+                        logger.warning(f"Failed to blacklist refresh token: {str(e)}")
 
-            old_device.delete()
+            # Remove old devices
+            old_devices.delete()
             
-        UserDevice.objects.filter(device_id=device_id).delete()
-        UserDevice.objects.filter(fcm_token=fcm_token).delete()
-
-    # def _get_qr_info(self, user):
-    #     """Get QR code info (existing logic preserved)"""
-    #     qr_code = QRCode.objects.filter(user=user, is_active=True).first()
-    #     if qr_code:
-    #         return {
-    #             "domain": settings.BACKEND_URL,
-    #             "api_route": "/qr/scan-qr/",
-    #             "hashed_qr_id": str(generate_qr_code(qr_code.qr_id, qr_code.created_at))
-    #         }
-    #     return ''
+            # Remove devices with same device_id or fcm_token from other users
+            UserDevice.objects.filter(device_id=device_id).exclude(user=user).delete()
+            UserDevice.objects.filter(fcm_token=fcm_token).exclude(user=user).delete()
+            
+        except Exception as e:
+            logger.error(f"Device cleanup failed: {str(e)}")
+            # Don't fail the entire process if cleanup fails
 
     def get_client_ip(self, request):
         """Get client IP (existing logic preserved)"""
         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
         return x_forwarded_for.split(',')[0] if x_forwarded_for else request.META.get('REMOTE_ADDR')
 
-    
-# class VerifyOTPView(APIView):
-#     permission_classes = [AllowAny]
-#     # throttle_classes = [AuthThrottle]  # include if imported
-
-#     @transaction.atomic
-#     def post(self, request):
-#         """
-#         Verify OTP and complete user registration/login.
-#         Enhancements: referral verification and registration reward triggering.
-#         """
-#         serializer = VerifyOTPSerializer(data=request.data)
-#         if not serializer.is_valid():
-#             return Response({
-#                 'message': 'Error',
-#                 'errors': serializer.errors,
-#                 'status': status.HTTP_400_BAD_REQUEST
-#             }, status=status.HTTP_400_BAD_REQUEST)
-
-#         user = serializer.validated_data["user"]
-#         device_type = serializer.validated_data.get("device_type", "")
-#         fcm_token = request.headers.get("X-FCM-Token")
-#         device_id = request.headers.get("X-Device-ID")
-
-#         if not fcm_token or not device_id:
-#             return Response({
-#                 'message': 'Error',
-#                 'errors': {'headers': 'FCM-TOKEN and DEVICE-ID headers are required'},
-#                 'status': status.HTTP_400_BAD_REQUEST
-#             }, status=status.HTTP_400_BAD_REQUEST)
-
-#         try:
-#             # 1. Device / token management
-#             with transaction.atomic():
-#                 self._cleanup_old_devices(user, device_id, fcm_token)
-
-#                 device, _ = UserDevice.objects.update_or_create(
-#                     user=user,
-#                     device_id=device_id,
-#                     defaults={
-#                         'fcm_token': fcm_token,
-#                         'device_type': device_type,
-#                         'os_version': serializer.validated_data.get("os_version", ""),
-#                         'ip_address': self.get_client_ip(request),
-#                         'last_active': timezone.now(),
-#                     }
-#                 )
-
-#                 refresh = RefreshToken.for_user(user)
-#                 access = refresh.access_token
-
-#                 device.last_access_token = str(access)
-#                 device.last_refresh_token_jti = refresh['jti']
-#                 device.save()
-
-#             # 2. Referral-related logic: verify pending relationship and grant registration reward
-#             referral_payload = {}
-#             try:
-#                 relationship = ReferralRelationship.objects.select_for_update().filter(
-#                     referred_user=user,
-#                     status='pending'
-#                 ).first()
-#                 if relationship:
-#                     now = timezone.now()
-#                     # Mark email/OTP verified
-#                     relationship.user_verified_at = now
-#                     if relationship.created_at:
-#                         delta = now - relationship.created_at
-#                         relationship.days_to_verify = delta.days
-#                     relationship.status = 'verified'
-#                     relationship.save(update_fields=[
-#                         'user_verified_at', 'days_to_verify', 'status', 'updated_at'
-#                     ])
-
-#                     # Log email verified event
-#                     log_event(
-#                         user=user,
-#                         event_type=EVENT_TYPE_USER_VERIFIED,
-#                         referral_relationship=relationship,
-#                         referral_code=relationship.referral_code_used,
-#                         metadata={'stage': 'otp_verified'},
-#                         ip_address=self.get_client_ip(request),
-#                         user_agent=request.META.get("HTTP_USER_AGENT", "")[:1000],
-#                         device_type=device_type or ''
-#                     )
-
-#                     # Attempt to grant registration reward if not already rewarded.
-#                     # Hook into reward service if available.
-#                     try:
-#                         # Try importing a reward granter; adapt path if your reward service exposes differently.
-#                         from reward_service.services import grant_reward  # expected signature below
-#                     except ImportError:
-#                         grant_reward = None
-
-#                     if grant_reward:
-#                         try:
-#                             # grant_reward(referrer, referred_user, trigger_event, relationship, payment_amount=None)
-#                             grant_reward(
-#                                 referrer=relationship.referrer,
-#                                 referred_user=user,
-#                                 trigger_event='registration',
-#                                 relationship=relationship
-#                             )
-#                             # Mark rewarded timestamps
-#                             now2 = timezone.now()
-#                             if not relationship.referrer_rewarded_at:
-#                                 relationship.referrer_rewarded_at = now2
-#                             if not relationship.referred_user_rewarded_at:
-#                                 relationship.referred_user_rewarded_at = now2
-#                             relationship.status = 'rewarded'
-#                             relationship.save(update_fields=[
-#                                 'referrer_rewarded_at', 'referred_user_rewarded_at', 'status', 'updated_at'
-#                             ])
-
-#                             log_event(
-#                                 user=user,
-#                                 event_type=EVENT_TYPE_REWARD_GIVEN,
-#                                 referral_relationship=relationship,
-#                                 referral_code=relationship.referral_code_used,
-#                                 metadata={'for': 'registration'},
-#                                 ip_address=self.get_client_ip(request),
-#                                 user_agent=request.META.get("HTTP_USER_AGENT", "")[:1000],
-#                                 device_type=device_type or ''
-#                             )
-#                         except Exception as e:
-#                             logger.warning("Failed to grant referral registration reward: %s", str(e))
-
-#                     # Include referral relationship in response
-#                     from referral_service.api.v1.serializers.relationship_serializer import ReferralRelationshipSerializer
-#                     referral_payload['referral_relationship'] = ReferralRelationshipSerializer(relationship).data
-
-#             except Exception as e:
-#                 logger.exception("Referral verification path failed for user %s: %s", getattr(user, 'user_id', None), str(e))
-#                 # proceed without blocking
-
-#             # 3. QR info
-#             qr_info = self._get_qr_info(user)
-
-#             # 4. Build response
-#             response_data = {
-#                 'access_token': str(access),
-#                 'refresh_token': str(refresh),
-#                 'user_id': user.user_id,
-#                 'user_name': user.user_name,
-#                 'email': user.email if getattr(user, 'email_verified', False) else "",
-#                 'first_name': user.first_name or "",
-#                 'last_name': user.last_name or "",
-#                 'active_devices': user.devices.count(),
-#                 'qr': qr_info,
-#             }
-#             response_data.update(referral_payload)
-
-#             return Response({
-#                 'message': 'Login successful',
-#                 'data': response_data,
-#                 'status': status.HTTP_200_OK
-#             }, status=status.HTTP_200_OK)
-
-#         except Exception as e:
-#             logger.exception(f"OTP verification failed for user {getattr(user, 'user_id', None)}: {str(e)}")
-#             return Response({
-#                 'message': 'Error',
-#                 'errors': {'system': 'Login processing failed'},
-#                 'status': status.HTTP_500_INTERNAL_SERVER_ERROR
-#             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-#     def _cleanup_old_devices(self, user, device_id, fcm_token):
-#         """Clean up old devices and blacklist tokens."""
-#         # Remove oldest device if present
-#         old_device = user.devices.first()
-#         if old_device:
-#             if old_device.last_access_token:
-#                 try:
-#                     BlacklistedAccessToken.objects.get_or_create(
-#                         token=old_device.last_access_token,
-#                         user=user
-#                     )
-#                 except Exception:
-#                     pass
-
-#             if old_device.last_refresh_token_jti:
-#                 try:
-#                     from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
-#                     BlacklistedToken.objects.filter(token__jti=old_device.last_refresh_token_jti).delete()
-#                     OutstandingToken.objects.filter(jti=old_device.last_refresh_token_jti).delete()
-#                 except Exception:
-#                     pass
-
-#             old_device.delete()
-
-#         UserDevice.objects.filter(device_id=device_id).delete()
-#         UserDevice.objects.filter(fcm_token=fcm_token).delete()
-
-#     def _get_qr_info(self, user):
-#         """Get QR code info."""
-#         qr_code = QRCode.objects.filter(user=user, is_active=True).first()
-#         if qr_code:
-#             return {
-#                 "domain": settings.BACKEND_URL,
-#                 "api_route": "/qr/scan-qr/",
-#                 "hashed_qr_id": str(generate_qr_code(qr_code.qr_id, qr_code.created_at))
-#             }
-#         return ''
-
-#     def get_client_ip(self, request):
-#         """Get client IP (existing logic preserved)"""
-#         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-#         return x_forwarded_for.split(',')[0].strip() if x_forwarded_for else request.META.get('REMOTE_ADDR')
-
 
 class LogoutView(APIView):
+    """Logout for regular users only"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        refresh_token = request.data.get("refresh_token")
+        fcm_token = request.headers.get("fcm_token")
+        device_id = request.headers.get("X-Device-ID")
+        
+        BlacklistedAccessToken = AuthService.get_blacklisted_access_token_model()
+        UserDevice = AuthService.get_user_device_model()
+
+        # Validate required logout data
+        if not refresh_token:
+            raise ValidationException(
+                detail="Missing refresh token",
+                context={'refresh_token': 'Refresh token is required for logout'}
+            )
+
+        logout_errors = []
+        logout_success = []
+
+        # 1. Blacklist access token
         try:
-            access_token = request.auth
-            refresh_token = request.data.get("refresh_token")
-            fcm_token = request.data.get("fcm_token")
+            if request.auth:
+                BlacklistedAccessToken.objects.get_or_create(
+                    token=str(request.auth),
+                    user=request.user
+                )
+                logout_success.append("access_token_blacklisted")
+        except Exception as e:
+            logout_errors.append(f"Access token blacklist failed: {str(e)}")
+            logger.warning(f"Access token blacklist failed for user {request.user.id}: {str(e)}")
 
-            if access_token:
-                BlacklistedAccessToken.objects.create(token=str(access_token))
+        # 2. Blacklist refresh token
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+            logout_success.append("refresh_token_blacklisted")
+        except TokenError:
+            raise AuthenticationException(
+                detail="Invalid refresh token",
+                context={'refresh_token': 'Refresh token is invalid or already blacklisted'}
+            )
+        except Exception as e:
+            logout_errors.append(f"Refresh token blacklist failed: {str(e)}")
+            logger.warning(f"Refresh token blacklist failed for user {request.user.id}: {str(e)}")
 
-            if refresh_token:
-                token = RefreshToken(refresh_token)
-                token.blacklist()
+        # 3. Remove device registration (optional)
+        if device_id or fcm_token:
+            try:
+                device_filter = {'user': request.user}
+                if device_id:
+                    device_filter['device_id'] = device_id
+                if fcm_token:
+                    device_filter['fcm_token'] = fcm_token
+                
+                deleted_count, _ = UserDevice.objects.filter(**device_filter).delete()
+                if deleted_count > 0:
+                    logout_success.append("device_unregistered")
+                    
+            except Exception as e:
+                logout_errors.append(f"Device cleanup failed: {str(e)}")
+                logger.warning(f"Device cleanup failed for user {request.user.id}: {str(e)}")
 
-            if fcm_token:
-                UserDevice.objects.filter(user=request.user, fcm_token=fcm_token).delete()
+        # Return success even if some cleanup failed
+        response_data = {
+            'message': "Logged out successfully",
+            'data': None,
+            'status': status.HTTP_205_RESET_CONTENT,
+        }
 
-            return Response({'message': "Logged out", "status": status.HTTP_205_RESET_CONTENT},
-                            status=status.HTTP_205_RESET_CONTENT)
-
-        except Exception:
-            raise InvalidRequestException(detail="Invalid logout request")
-
+        if logout_errors:
+            response_data['warnings'] = logout_errors
+            
+        return Response(response_data, status=status.HTTP_205_RESET_CONTENT)
 
 class SendEmailOTPView(APIView):
     permission_classes = [IsAuthenticated]
@@ -679,32 +652,90 @@ class VerifyEmailOTPView(APIView):
             context=serializer.errors
         )
 
-
 class UpdateUserInfoView(APIView):
+    """Update user info for regular users only"""
     permission_classes = [IsAuthenticated]
     
     def patch(self, request):
-        """
-        Partial update of user information - PATCH method
-        """
+        """Partial update of user information - PATCH method"""
         serializer = FlexibleUpdateUserInfoSerializer(
             data=request.data,
             context={'user': request.user}
         )
 
-        if serializer.is_valid():
+        if not serializer.is_valid():
+            raise ValidationException(
+                detail="User information validation failed",
+                context=serializer.errors
+            )
+
+        try:
             user = serializer.update(request.user, serializer.validated_data)
             
             return Response({
                 "data": BaseUserSerializer(user).data,
-                "message": "User information updated successfully.",
+                "message": "User information updated successfully",
                 "status": status.HTTP_200_OK
             }, status=status.HTTP_200_OK)
 
-        raise ValidationException(
-            detail="Invalid data",
-            context=serializer.errors
-        )
+        except ValidationError as ve:
+            raise ValidationException(
+                detail="User update validation failed",
+                context={'validation': str(ve)}
+            )
+        except IntegrityError as ie:
+            raise ConflictException(
+                detail="User information conflict",
+                context={'conflict': 'Data already exists or violates constraints'}
+            )
+        except Exception as e:
+            logger.error(f"User info update failed: {str(e)}", exc_info=True)
+            raise ServiceUnavailableException(
+                detail="User update service temporarily unavailable"
+            )
+    
+class ScanCarPlateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, car_plate_number):
+        # Validate car plate number format
+        if not car_plate_number or len(car_plate_number.strip()) < 2:
+            raise ValidationException(
+                detail="Invalid car plate number format",
+                context={'car_plate_number': 'Car plate number must be at least 2 characters'}
+            )
+
+        User = AuthService.get_user_model()
+        
+        try:
+            user = User.objects.get(license_plate_number=car_plate_number.upper().strip())
+            
+            return Response({
+                "message": "User found successfully",
+                "data": {
+                    "zego_user_id": user.user_id,
+                    "zego_user_name": user.user_name,
+                    "license_plate": user.license_plate_number
+                },
+                "status": status.HTTP_200_OK
+            }, status=status.HTTP_200_OK)
+        
+        except User.DoesNotExist:
+            raise NotFoundException(  # Better than ResourceNotFoundException
+                detail="User not found",
+                context={'car_plate_number': f'No user registered with plate number: {car_plate_number}'}
+            )
+        except User.MultipleObjectsReturned:
+            logger.warning(f"Multiple users found for plate number: {car_plate_number}")
+            raise ConflictException(
+                detail="Multiple users found with same plate number",
+                context={'car_plate_number': 'Data integrity issue - contact support'}
+            )
+        except Exception as e:
+            logger.error(f"Car plate scan failed: {str(e)}", exc_info=True)
+            raise ServiceUnavailableException(
+                detail="Car plate lookup service temporarily unavailable"
+            )
 
 
 class AdminUserListView(APIView):
@@ -723,24 +754,3 @@ class AdminBlacklistedTokenListView(APIView):
         tokens = BlacklistedAccessToken.objects.all()
         serializer = BlacklistedAccessTokenSerializer(tokens, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
-class ScanCarPlateView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, car_plate_number):
-        try:
-            user = User.objects.get(license_plate_number=car_plate_number)
-            return Response(
-                {
-                    "message": "User found",
-                    "data": {
-                        "zego_user_id": user.user_id,
-                        "zego_user_name": user.user_name
-                    },
-                    "status": status.HTTP_200_OK
-                },
-                status=status.HTTP_200_OK
-            )
-        
-        except User.DoesNotExist:
-            raise ResourceNotFoundException(detail="No user found with this car plate number")

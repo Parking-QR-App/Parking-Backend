@@ -1,12 +1,25 @@
 from django.core.cache import cache
+from django.db import IntegrityError, DatabaseError
 from ..models import Notification
+from django.conf import settings
+from shared.utils.api_exceptions import (
+    ValidationException,
+    ServiceUnavailableException,
+    ConflictException
+)
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Notifier:
+    IDEMPOTENCY_PREFIX = "NOTIF:IDEMPOTENCY:"
+    DEFAULT_IDEMPOTENCY_TTL = getattr(settings, "NOTIFICATION_IDEMPOTENCY_TTL", 86400)  # 24h default
+
     @classmethod
     def send_notification(
         cls,
-        sender,         # Can be User object or None
-        receiver,       # User object or ID
+        sender,
+        receiver,
         notification_type,
         title,
         message,
@@ -14,42 +27,88 @@ class Notifier:
         idempotency_key=None,
         immediate=True
     ):
-        """
-        Creates and dispatches a notification
+        # Input validation
+        if not receiver:
+            raise ValidationException(
+                detail="Receiver is required",
+                context={'receiver': 'Receiver cannot be None'}
+            )
         
-        Args:
-            immediate: If True, sends synchronously (for critical alerts)
-        """
-        # Idempotency check
-        if idempotency_key and cache.get(f"notif:{idempotency_key}"):
-            return None
-            
-        cache.set(f"notif:{idempotency_key}", True, timeout=86400)  # 24h
+        if not notification_type:
+            raise ValidationException(
+                detail="Notification type is required",
+                context={'notification_type': 'Notification type cannot be empty'}
+            )
+        
+        if not title:
+            raise ValidationException(
+                detail="Title is required",
+                context={'title': 'Title cannot be empty'}
+            )
+        
+        if not message:
+            raise ValidationException(
+                detail="Message is required",
+                context={'message': 'Message cannot be empty'}
+            )
 
-        # Handle sender (can be User object, ID, or None)
-        # sender_id = None
-        # if sender is not None:
-        #     sender_id = sender.id if hasattr(sender, 'id') else sender
+        try:
+            # Handle idempotency
+            if idempotency_key:
+                cache_key = f"{cls.IDEMPOTENCY_PREFIX}{idempotency_key}"
+                try:
+                    if cache.get(cache_key):
+                        return None  # Already processed
+                    cache.set(cache_key, True, timeout=cls.DEFAULT_IDEMPOTENCY_TTL)
+                except Exception as e:
+                    logger.warning(f"Cache error for idempotency key: {str(e)}")
+                    # Continue without idempotency if cache fails
 
-        # # Handle receiver
-        # receiver_id = receiver.id if hasattr(receiver, 'id') else receiver
-        # Create notification record
-        notification = Notification.objects.create(
-            sender=sender,  # Add sender
-            user=receiver,
-            type=notification_type,
-            title=title,
-            message=message,
-            metadata=metadata or {}
-        )
+            # Create notification
+            try:
+                notification = Notification.objects.create(
+                    sender=sender,
+                    user=receiver,
+                    type=notification_type,
+                    title=title,
+                    message=message,
+                    metadata=metadata or {}
+                )
+            except IntegrityError as e:
+                logger.error(f"Integrity error creating notification: {str(e)}")
+                raise ConflictException(
+                    detail="Notification creation conflict",
+                    context={'reason': 'Database constraint violation'}
+                )
+            except DatabaseError as e:
+                logger.error(f"Database error creating notification: {str(e)}")
+                raise ServiceUnavailableException(
+                    detail="Notification database temporarily unavailable"
+                )
 
-        # Dispatch
-        if immediate:
-            from ..tasks import deliver_notification_task
-            deliver_notification_task.apply(args=[notification.id])  # Synchronous
-        else:
-            from ..tasks import deliver_notification_task
-            print("SENDER1")
-            deliver_notification_task.delay(notification.id)  # Async
-            
-        return notification
+            # Queue notification delivery
+            try:
+                from ..tasks import deliver_notification_task
+                if immediate:
+                    deliver_notification_task.apply(args=[notification.id])
+                else:
+                    deliver_notification_task.delay(notification.id)
+            except Exception as e:
+                logger.error(f"Failed to queue notification delivery: {str(e)}")
+                # Don't fail notification creation for delivery queue issues
+                logger.warning(f"Notification {notification.id} created but delivery queue failed")
+
+            return notification
+
+        except ValidationException:
+            raise
+        except ConflictException:
+            raise
+        except ServiceUnavailableException:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error sending notification: {str(e)}", exc_info=True)
+            raise ServiceUnavailableException(
+                detail="Notification service temporarily unavailable",
+                context={'user_message': 'Unable to send notification. Please try again.'}
+            )

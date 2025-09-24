@@ -24,3 +24,4 @@ whitenoise[brotli]
 dj-database-url
 firebase-admin
 prometheus_client
+django-filter
